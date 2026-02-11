@@ -232,7 +232,9 @@ def predict(timeframe: str,
             out_csv: str,
             min_conf: float = 0.0,
             features: list[str] = None,
-            use_two_stage: bool = False):
+            use_two_stage: bool = False,
+            use_dxy: bool = False,
+            use_cot: bool = False):
 
     # === META ===
     meta_path = _find_meta_for_tf(MODELS_DIR, timeframe)
@@ -295,21 +297,31 @@ def predict(timeframe: str,
         gold = _merge_asof(gold, vix, vix_col, "vix")
     else:
         gold["vix"] = np.nan
-    dxy = _read_csv_safe(os.path.join(DATA_DIR, "dxy.csv"))
-    if not dxy.empty:
-        dxy_col = "dxy" if "dxy" in dxy.columns else ("close" if "close" in dxy.columns else dxy.columns[-1])
-        gold = _merge_asof(gold, dxy, dxy_col, "dxy")
+    use_dxy = bool(use_dxy or meta.get("use_dxy", False))
+    use_cot = bool(use_cot or meta.get("use_cot", False))
+
+    if use_dxy:
+        dxy = _read_csv_safe(os.path.join(DATA_DIR, "dxy.csv"))
+        if not dxy.empty:
+            dxy_col = "dxy" if "dxy" in dxy.columns else ("close" if "close" in dxy.columns else dxy.columns[-1])
+            gold = _merge_asof(gold, dxy, dxy_col, "dxy")
+        else:
+            gold["dxy"] = np.nan
     else:
-        gold["dxy"] = np.nan
-    cot = _read_csv_safe(os.path.join(DATA_DIR, "cot.csv"))
-    if not cot.empty:
-        cot_shift_days = int(meta.get("cot_shift_days", 0))
-        if cot_shift_days != 0:
-            cot["date"] = cot["date"] + pd.Timedelta(days=cot_shift_days)
-        cot_col = next((c for c in ("cot", "net", "value", "close") if c in cot.columns), cot.columns[-1])
-        gold = _merge_asof(gold, cot, cot_col, "cot")
+        gold["dxy"] = 0.0
+
+    if use_cot:
+        cot = _read_csv_safe(os.path.join(DATA_DIR, "cot.csv"))
+        if not cot.empty:
+            cot_shift_days = int(meta.get("cot_shift_days", 0))
+            if cot_shift_days != 0:
+                cot["date"] = cot["date"] + pd.Timedelta(days=cot_shift_days)
+            cot_col = next((c for c in ("cot", "net", "value", "close") if c in cot.columns), cot.columns[-1])
+            gold = _merge_asof(gold, cot, cot_col, "cot")
+        else:
+            gold["cot"] = np.nan
     else:
-        gold["cot"] = np.nan
+        gold["cot"] = 0.0
     for c in ("vix", "dxy", "cot"):
         gold[c] = gold[c].ffill().bfill()
 
@@ -524,6 +536,8 @@ if __name__ == "__main__":
     parser.add_argument("--min_conf", type=float, default=0.0, help="Filtr síly signálu (0–1)")
     parser.add_argument("--features", type=str, default=None, help="Seznam indikátorů oddělených čárkou (např. rsi,macd,ema20)")
     parser.add_argument("--use_two_stage", action="store_true", help="Použít dvoustupňovou inferenci (Trade→Direction).")
+    parser.add_argument("--use_dxy", action="store_true", help="Zapnout DXY feature i bez metadata flagu.")
+    parser.add_argument("--use_cot", action="store_true", help="Zapnout COT feature i bez metadata flagu.")
 
     args = parser.parse_args()
     out_csv = args.output or os.path.join(RESULTS_DIR, f"predictions_{args.timeframe}.csv")
@@ -532,4 +546,6 @@ if __name__ == "__main__":
             out_csv=out_csv,
             min_conf=args.min_conf,
             features=features_list,
-            use_two_stage=args.use_two_stage)
+            use_two_stage=args.use_two_stage,
+            use_dxy=args.use_dxy,
+            use_cot=args.use_cot)

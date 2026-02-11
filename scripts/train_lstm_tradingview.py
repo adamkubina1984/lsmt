@@ -116,7 +116,9 @@ def train_lstm(
     cot_shift_days: int = 3,
     features: str = "rsi,macd,ema20,bb,atr",
     output_dir: str = "models",
-    mode: str = "multi"                   # << přidán parametr
+    mode: str = "multi",                  # << přidán parametr
+    use_dxy: bool = False,
+    use_cot: bool = False
 ):
     # --- výstupní složka a identifikátor běhu ---
     OUT_DIR = os.path.join(ROOT_DIR, output_dir)  # respektuje parametr --output_dir
@@ -145,31 +147,37 @@ def train_lstm(
     else:
         gold["vix"] = np.nan
 
-    # --- DXY ---
-    dxy = _read_csv_safe(os.path.join(DATA_DIR, "dxy.csv"))
-    if not dxy.empty:
-        dxy_col = "dxy" if "dxy" in dxy.columns else ("close" if "close" in dxy.columns else dxy.columns[-1])
-        gold = _merge_asof(gold, dxy, dxy_col, "dxy")
+    # --- DXY (volitelne) ---
+    if use_dxy:
+        dxy = _read_csv_safe(os.path.join(DATA_DIR, "dxy.csv"))
+        if not dxy.empty:
+            dxy_col = "dxy" if "dxy" in dxy.columns else ("close" if "close" in dxy.columns else dxy.columns[-1])
+            gold = _merge_asof(gold, dxy, dxy_col, "dxy")
+        else:
+            gold["dxy"] = np.nan
     else:
-        gold["dxy"] = np.nan
+        gold["dxy"] = 0.0
 
-    # --- COT (weekly, může chybět) ---
-    cot_path = os.path.join(DATA_DIR, "cot.csv")
-    cot = _read_csv_safe(cot_path)
-    if not cot.empty:
-        # posun (report je k úterý, publikace v pátek)
-        if cot_shift_days != 0:
-            cot["date"] = cot["date"] + pd.Timedelta(days=cot_shift_days)
-        # najdi sloupec s hodnotou
-        cot_val_col = None
-        for cand in ("cot", "net", "value", "close"):
-            if cand in cot.columns:
-                cot_val_col = cand; break
-        if cot_val_col is None:
-            cot_val_col = cot.columns[-1]
-        gold = _merge_asof(gold, cot[["date", cot_val_col]].rename(columns={cot_val_col:"cot"}), "cot", "cot")
+    # --- COT (weekly, volitelne) ---
+    if use_cot:
+        cot_path = os.path.join(DATA_DIR, "cot.csv")
+        cot = _read_csv_safe(cot_path)
+        if not cot.empty:
+            # posun (report je k úterý, publikace v pátek)
+            if cot_shift_days != 0:
+                cot["date"] = cot["date"] + pd.Timedelta(days=cot_shift_days)
+            # najdi sloupec s hodnotou
+            cot_val_col = None
+            for cand in ("cot", "net", "value", "close"):
+                if cand in cot.columns:
+                    cot_val_col = cand; break
+            if cot_val_col is None:
+                cot_val_col = cot.columns[-1]
+            gold = _merge_asof(gold, cot[["date", cot_val_col]].rename(columns={cot_val_col:"cot"}), "cot", "cot")
+        else:
+            gold["cot"] = np.nan
     else:
-        gold["cot"] = np.nan
+        gold["cot"] = 0.0
     
     # --- zvolené indikátory (CSV -> list) ---
     wanted_feats = [s.strip().lower() for s in features.split(",") if s.strip()]
@@ -180,6 +188,10 @@ def train_lstm(
     indicator_cols = [c for c in gold.columns if c not in _before_cols and c != "date"]
     feature_cols = ["open", "high", "low", "close", "volume", "average"]
     for c in ("vix", "dxy", "cot"):
+        if c == "dxy" and not use_dxy:
+            continue
+        if c == "cot" and not use_cot:
+            continue
         if gold[c].notna().any():
             feature_cols.append(c)
     feature_cols += indicator_cols
@@ -293,6 +305,8 @@ def train_lstm(
     meta["seq_len"] = seq_len
     meta["threshold_pct"] = thr_pct
     meta["cot_shift_days"] = int(cot_shift_days)
+    meta["use_dxy"] = bool(use_dxy)
+    meta["use_cot"] = bool(use_cot)
     meta["feature_cols"] = feature_cols
     meta["features"] = wanted_feats  # aktuální sada indikátorů (ruční/auto)
 
@@ -340,6 +354,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--model_name", type=str, default=None)
     parser.add_argument("--cot_shift_days", type=int, default=3, help="Posun COT dat (dny, + posouvá kupředu; default 3)")
+    parser.add_argument("--use_dxy", action="store_true", help="Zapnout DXY feature v train pipeline.")
+    parser.add_argument("--use_cot", action="store_true", help="Zapnout COT feature v train pipeline.")
     parser.add_argument("--features", type=str, default="rsi,macd,ema20,bb,atr", help="Seznam indikátorů oddělených čárkou (např. rsi,macd,ema20,bb,atr)")
     parser.add_argument("--mode", choices=["multi", "trade", "direction"], default="multi", help="multi = původní 3-class; trade = binární Trade/NoTrade; direction = binární Buy/Sell (jen na samplech, kde nebyl No-Trade)")
 
@@ -354,6 +370,8 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         model_name=args.model_name,
         cot_shift_days=args.cot_shift_days,
+        use_dxy=args.use_dxy,
+        use_cot=args.use_cot,
         features=args.features,
         output_dir=args.output_dir,
         mode=args.mode              # << přidáno

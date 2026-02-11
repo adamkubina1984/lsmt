@@ -1,66 +1,57 @@
 # scripts/fetch_tradingview_data.py
 # ---------------------------------------
-# Stahování dat z TradingView pro GOLD, VIX, DXY a COT
-# ----------------------------------------------------
-# Autor: ChatGPT (na základě specifikace "Analýza AI modelu")
-# Popis: Tento skript stáhne historická data pro:
-#   - GOLD (TVC:GC=F) – timeframe 5min a 1h
-#   - VIX (CBOE Volatility Index)
-#   - DXY (US Dollar Index)
-#   - COT (Commitment of Traders - sentiment)
-# Data se uloží do data/raw/ ve formátu CSV.
+# Stahovani dat z TradingView pro GOLD/VIX a volitelne DXY/COT.
+# Data se ukladaji do data/raw/ ve formatu CSV.
 # ---------------------------------------
 
 import os
-from datetime import datetime
+import argparse
 from tvDatafeed import TvDatafeed, Interval
-import pandas as pd
 
-# --- Základní cesty projektu ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "..", "data", "raw")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# --- Přihlášení do TradingView ---
-# Pokud máš účet na TradingView, doplň své přihlašovací údaje:
-# Bez loginu funguje "nologin" režim (omezený počet svíček)
+# Bez loginu funguje nologin rezim (omezeny pocet svicek)
 tv = TvDatafeed()  # nebo TvDatafeed('tv_username', 'tv_password')
 
 
 def fetch_and_save(symbol: str, exchange: str, interval: Interval, n_bars: int, filename: str):
-    """
-    Obecná funkce pro stažení a uložení dat z TradingView.
-    """
     print(f"[INFO] Stahuji {symbol} ({interval.name}) ...")
     df = tv.get_hist(symbol=symbol, exchange=exchange, interval=interval, n_bars=n_bars)
 
     if df is None or df.empty:
-        print(f"[VAROVÁNÍ] Data pro {symbol} se nepodařilo stáhnout.")
+        print(f"[VAROVANI] Data pro {symbol} se nepodarilo stahnout.")
         return
 
     df.reset_index(inplace=True)
     df.rename(columns={"datetime": "date"}, inplace=True)
     out_path = os.path.join(DATA_DIR, filename)
     df.to_csv(out_path, index=False)
-    print(f"[OK] {symbol} uloženo jako {filename}")
+    print(f"[OK] {symbol} ulozeno jako {filename}")
 
 
-def main():
-    # --- GOLD ---
+def main(use_dxy: bool = False, use_cot: bool = False):
     fetch_and_save("GOLD", "TVC", Interval.in_5_minute, 5000, "gold_5m.csv")
     fetch_and_save("GOLD", "TVC", Interval.in_1_hour, 5000, "gold_1h.csv")
-
-    # --- VIX ---
     fetch_and_save("VIX", "CBOE", Interval.in_daily, 5000, "vix.csv")
 
-    # --- DXY ---
-    fetch_and_save("DXY", "TVC", Interval.in_daily, 5000, "dxy.csv")
+    if use_dxy:
+        fetch_and_save("DXY", "TVC", Interval.in_daily, 5000, "dxy.csv")
+    else:
+        print("[INFO] DXY fetch je vypnuty (--use_dxy pro zapnuti).")
 
-    # --- COT (Commitment of Traders) ---
-    # COT data TradingView poskytuje jako futures sentiment (1x týdně)
-    fetch_and_save("CFTC:091741_F", "CFTC", Interval.in_weekly, 2000, "cot.csv")
+    if use_cot:
+        fetch_and_save("CFTC:091741_F", "CFTC", Interval.in_weekly, 2000, "cot.csv")
+    else:
+        print("[INFO] COT fetch je vypnuty (--use_cot pro zapnuti).")
 
-    print("\n[OK] Stahování dokončeno. Data jsou uložena v data/raw/")
+    print("\n[OK] Stahovani dokonceno. Data jsou ulozena v data/raw/")
+
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser(description="Stazeni dat z TradingView (GOLD/VIX + volitelne DXY/COT).")
+    ap.add_argument("--use_dxy", action="store_true", help="Zapnout stahovani DXY.")
+    ap.add_argument("--use_cot", action="store_true", help="Zapnout stahovani COT.")
+    args = ap.parse_args()
+    main(use_dxy=args.use_dxy, use_cot=args.use_cot)
