@@ -242,22 +242,13 @@ class TradingGUI(tk.Tk):
         # 1) Sběr dat (vlevo)
         frame_data = tk.LabelFrame(tab1, text="Sběr dat", padx=10, pady=10)
         frame_data.grid(row=0, column=0, sticky='nsew', padx=10, pady=10)
-        btn_tv  = tk.Button(frame_data, text="📥 Stáhnout data (TradingView)", width=26, command=self.on_fetch)
-        btn_cot = tk.Button(frame_data, text="📥 Stáhnout data (COT)",        width=26, command=self.on_fetch)
+        btn_tv = tk.Button(frame_data, text="📥 Stáhnout data (GOLD + VIX)", width=26, command=self.on_fetch)
         btn_tv.pack(fill='x', pady=6)
-        btn_cot.pack(fill='x', pady=6)
-        create_tooltip(btn_tv,  "Stáhne/aktualizuje data z TV/VIX/DXY. (Ponecháno dle původní logiky)")
-        create_tooltip(btn_cot, "Vizuální tlačítko pro COT – mapováno na on_fetch (beze změny logiky)")
+        create_tooltip(btn_tv, "Stáhne/aktualizuje GOLD a VIX. DXY/COT jsou výchozí režim OFF.")
 
         row3 = tk.Frame(frame_data)
         row3.pack(fill='x', pady=(6,2))
-        tk.Label(row3, text="TV symbol:").pack(side='left')
-        self.var_symbol = tk.StringVar(value="GOLD")
-        tk.Entry(row3, textvariable=self.var_symbol, width=10).pack(side='left', padx=6)
-        tk.Label(row3, text="Exchange:").pack(side='left', padx=(12,0))
-        self.var_exchange = tk.StringVar(value="TVC")
-        tk.Entry(row3, textvariable=self.var_exchange, width=10).pack(side='left', padx=6)
-        tk.Label(row3, text="Base prefix:").pack(side='left', padx=(12,0))
+        tk.Label(row3, text="Base prefix:").pack(side='left')
         self.var_base = tk.StringVar(value="gold")
         tk.Entry(row3, textvariable=self.var_base, width=10).pack(side='left', padx=6)
 
@@ -312,11 +303,7 @@ class TradingGUI(tk.Tk):
         e_ba = tk.Entry(row1, textvariable=self.var_batch, width=6); e_ba.pack(side='left', padx=(4, 12))
         create_tooltip(e_ba, "Velikost batch. Obvykle 32–128 (podle RAM/CPU).")
 
-        row2 = tk.Frame(train_box); row2.pack(fill='x', pady=2)
-        tk.Label(row2, text="cot_shift (dny)").pack(side='left')
-        self.var_cot = tk.IntVar(value=3)
-        e_cot = tk.Entry(row2, textvariable=self.var_cot, width=6); e_cot.pack(side='left', padx=(4, 12))
-        create_tooltip(e_cot, "Posun COT dat (report je k úterý, publikace pátek).")
+        # COT je v default pipeline vypnutý; cot_shift proto v GUI schován.
 
         # Indikátory (ruční/auto) – sdílený panel, 3 sloupce
         tk.Label(train_box, text="Indikátory:").pack(anchor='w', pady=(8, 2))
@@ -718,7 +705,7 @@ class TradingGUI(tk.Tk):
         thr   = self.var_thr.get()
         ep    = self.var_epochs.get()
         batch = self.var_batch.get()
-        cotsh = self.var_cot.get()
+        cotsh = getattr(self, "var_cot", tk.IntVar(value=0)).get()
 
         # Zdroj indikátorů: auto = None (vezme se z metadat), ruční = checkboxy
         use_auto = (self.var_feat_source.get() == "auto")
