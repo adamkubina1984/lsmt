@@ -303,6 +303,9 @@ def predict(timeframe: str,
         gold["dxy"] = np.nan
     cot = _read_csv_safe(os.path.join(DATA_DIR, "cot.csv"))
     if not cot.empty:
+        cot_shift_days = int(meta.get("cot_shift_days", 0))
+        if cot_shift_days != 0:
+            cot["date"] = cot["date"] + pd.Timedelta(days=cot_shift_days)
         cot_col = next((c for c in ("cot", "net", "value", "close") if c in cot.columns), cot.columns[-1])
         gold = _merge_asof(gold, cot, cot_col, "cot")
     else:

@@ -104,7 +104,16 @@ def sleep_to_next_bar(timeframe: str, buffer_sec: int):
     log(f"Čekám {sleep_s}s do další kontroly (TF={timeframe}, buffer={buffer_sec}s)…")
     time.sleep(sleep_s)
 
-def live_loop(timeframe="5m", min_conf=0.47, allow_short=True, buffer_sec=10, auto_fetch=False, out_csv=None):
+def live_loop(timeframe="5m",
+              min_conf=0.47,
+              allow_short=True,
+              buffer_sec=10,
+              auto_fetch=False,
+              out_csv=None,
+              update_plot=False,
+              plot_window=100,
+              plot_overlay_vix=False,
+              plot_overlay_dxy=False):
     log("Start Live Runner")
     out_pred = RESULTS / f"predictions_{timeframe}.csv"
     live_csv = Path(out_csv) if out_csv else (RESULTS / f"live_signals_{timeframe}.csv")
@@ -160,6 +169,21 @@ def live_loop(timeframe="5m", min_conf=0.47, allow_short=True, buffer_sec=10, au
                     f"{proba_buy:.4f}", f"{proba_sell:.4f}", f"{proba_no_trade:.4f}",
                     datetime.utcnow().isoformat()
                 ])
+
+            if update_plot:
+                try:
+                    plot_cmd = [
+                        py(), str(SCRIPTS / "plot_signals.py"),
+                        "--input", str(out_pred),
+                        "--window", str(int(plot_window)),
+                    ]
+                    if plot_overlay_vix:
+                        plot_cmd.append("--overlay_vix")
+                    if plot_overlay_dxy:
+                        plot_cmd.append("--overlay_dxy")
+                    subprocess.run(plot_cmd, cwd=str(ROOT), check=False, capture_output=True, text=True)
+                except Exception as e:
+                    log(f"[WARN] Plot update selhal: {e}")
 
             last_emitted_ts = pred_ts
 

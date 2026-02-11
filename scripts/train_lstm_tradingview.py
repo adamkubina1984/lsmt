@@ -292,6 +292,7 @@ def train_lstm(
     meta["timeframe"] = timeframe
     meta["seq_len"] = seq_len
     meta["threshold_pct"] = thr_pct
+    meta["cot_shift_days"] = int(cot_shift_days)
     meta["feature_cols"] = feature_cols
     meta["features"] = wanted_feats  # aktuální sada indikátorů (ruční/auto)
 

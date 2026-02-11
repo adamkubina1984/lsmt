@@ -76,9 +76,13 @@ def simulate(path_csv,
     lo_pct = float(trade_pct_low) if trade_pct_low is not None else None
     
     if min_conf_buy is not None:
-        df = df[df.get("proba_buy", 0) >= min_conf_buy]
+        if "proba_buy" not in df.columns:
+            df["proba_buy"] = 0.0
+        df = df[df["proba_buy"] >= min_conf_buy]
     if min_conf_sell is not None:
-        df = df[df.get("proba_sell", 0) >= min_conf_sell]
+        if "proba_sell" not in df.columns:
+            df["proba_sell"] = 0.0
+        df = df[df["proba_sell"] >= min_conf_sell]
 
     # ---------- hlavní smyčka ----------
     for i, row in df.iterrows():

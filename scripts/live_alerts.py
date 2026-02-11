@@ -6,6 +6,7 @@ import pandas as pd
 import joblib
 from datetime import datetime
 from tensorflow.keras.models import load_model
+from features import add_indicators
 
 # Windows zvuk / toast (toast volitelně)
 WIN = (os.name == 'nt')
@@ -54,14 +55,16 @@ def load_meta(timeframe="5m"):
     scaler = joblib.load(ROOT / meta["scaler_path"])
     feats = meta["feature_cols"]
     seq_len = int(meta["seq_len"])
-    return model, scaler, feats, seq_len
+    indicators = [f.strip().lower() for f in meta.get("features", [])]
+    cot_shift_days = int(meta.get("cot_shift_days", 0))
+    return model, scaler, feats, seq_len, indicators, cot_shift_days
 
 def last_closed_bar_5m(ts: pd.Timestamp) -> bool:
     # jednoduchá detekce uzavřené 5m svíčky v lokálním čase souboru:
     # spoléháme na to, že gold_5m.csv je generováno fetch skriptem po uzavření baru
     return True
 
-def predict_last(model, scaler, feats, seq_len, timeframe="5m"):
+def predict_last(model, scaler, feats, seq_len, timeframe="5m", indicators=None, cot_shift_days=0):
     # načti GOLD
     gold = _read_csv(DATA / f"gold_{'5m' if timeframe=='5m' else '1h'}.csv")
     if gold.empty or len(gold) < seq_len+1:
@@ -72,17 +75,22 @@ def predict_last(model, scaler, feats, seq_len, timeframe="5m"):
 
     # VIX/DXY/COT merge
     def safe_merge(name, col):
+        nonlocal gold
         df = _read_csv(DATA / f"{name}.csv")
         if df.empty:
             gold[col] = np.nan
         else:
+            if name == "cot" and cot_shift_days != 0 and "date" in df.columns:
+                df["date"] = pd.to_datetime(df["date"], errors="coerce") + pd.Timedelta(days=cot_shift_days)
             src = col if col in df.columns else ("close" if "close" in df.columns else df.columns[-1])
-            gold[:] = _merge_asof(gold, df, src, col)
+            gold = _merge_asof(gold, df, src, col)
     safe_merge("vix","vix")
     safe_merge("dxy","dxy")
     safe_merge("cot","cot")
     for c in ("vix","dxy","cot"):
         gold[c] = gold[c].ffill().bfill()
+
+    gold = add_indicators(gold, indicators or [])
 
     # vyber jen požadované featury (chybějící doplň 0)
     X_df = gold.copy()
@@ -133,13 +141,18 @@ def live_loop(timeframe="5m", min_conf=0.47, allow_short=True, poll_sec=10, out_
     if not out_csv.exists():
         pd.DataFrame(columns=["date", "signal", "strength", "price", "proba_no_trade", "proba_buy", "proba_sell"]).to_csv(out_csv, index=False)
 
-    model, scaler, feats, seq_len = load_meta(timeframe=timeframe)
+    model, scaler, feats, seq_len, indicators, cot_shift_days = load_meta(timeframe=timeframe)
     last_alert_time = None
 
     while True:
         try:
             # poslední uzavřený bar
-            res = predict_last(model, scaler, feats, seq_len, timeframe=timeframe)
+            res = predict_last(
+                model, scaler, feats, seq_len,
+                timeframe=timeframe,
+                indicators=indicators,
+                cot_shift_days=cot_shift_days
+            )
             if res is None:
                 time.sleep(poll_sec); continue
 
