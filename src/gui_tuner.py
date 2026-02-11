@@ -835,14 +835,79 @@ class TradingGUI(tk.Tk):
         stop  = getattr(self, 'var_scan_stop',  tk.DoubleVar(value=0.70)).get()
         step  = getattr(self, 'var_scan_step',  tk.DoubleVar(value=0.01)).get()
         fee   = getattr(self, 'var_fee',        tk.DoubleVar(value=0.30)).get()
+        out_csv = Path("results") / f"scan_min_conf_{pred_csv.stem}.csv"
         cmd = [self.py(), str(SCAN_SCRIPT),
                "--input", str(pred_csv),
                "--allow_short",
                "--fee_pct", f"{fee/100.0:.6f}",
                "--start",   f"{start:.3f}",
                "--stop",    f"{stop:.3f}",
-               "--step",    f"{step:.3f}"]
-        run_cmd(cmd, self.log_async, ROOT)
+               "--step",    f"{step:.3f}",
+               "--out_csv", str(out_csv)]
+        self._run_scan_with_summary(cmd, ROOT / out_csv)
+
+    def _run_scan_with_summary(self, cmd: list, out_csv: Path):
+        def _runner():
+            self.log_async(f">>> {' '.join(str(x) for x in cmd)}")
+            try:
+                with subprocess.Popen(
+                    [str(c) for c in cmd],
+                    cwd=str(ROOT),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                ) as p:
+                    for line in p.stdout:
+                        if line is not None:
+                            self.log_async(line.rstrip())
+                    ret = p.wait()
+                    if ret != 0:
+                        self.log_async(f"[CHYBA] Scan skoncil s navratovym kodem {ret}.")
+                        return
+                self.log_async(f"[OK] Scan CSV: {out_csv}")
+                self._log_scan_summary(out_csv)
+            except Exception as e:
+                self.log_async(f"[VYJIMKA] {e}")
+        threading.Thread(target=_runner, daemon=True).start()
+
+    def _log_scan_summary(self, out_csv: Path):
+        if not out_csv.exists():
+            self.log_async(f"[VAROVANI] Vysledny soubor nenalezen: {out_csv}")
+            return
+        try:
+            with open(out_csv, newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+        except Exception:
+            with open(out_csv, newline="", encoding="cp1250") as f:
+                rows = list(csv.DictReader(f))
+
+        if not rows:
+            self.log_async("[INFO] Scan probehl, ale CSV je prazdne.")
+            return
+
+        def _to_float(v, default=-1e18):
+            try:
+                return float(v)
+            except Exception:
+                return default
+
+        top_sharpe = sorted(rows, key=lambda r: _to_float(r.get("Sharpe")), reverse=True)[:5]
+        top_pnl = sorted(rows, key=lambda r: _to_float(r.get("PnL_%")), reverse=True)[:5]
+
+        self.log_async("[SCAN] TOP podle Sharpe:")
+        for r in top_sharpe:
+            self.log_async(
+                f"min_conf={r.get('min_conf')} | PnL={r.get('PnL_%')}% | "
+                f"Sharpe={r.get('Sharpe')} | MaxDD={r.get('MaxDD_%')}% | Trades={r.get('Trades')}"
+            )
+
+        self.log_async("[SCAN] TOP podle PnL_%:")
+        for r in top_pnl:
+            self.log_async(
+                f"min_conf={r.get('min_conf')} | PnL={r.get('PnL_%')}% | "
+                f"Sharpe={r.get('Sharpe')} | MaxDD={r.get('MaxDD_%')}% | Trades={r.get('Trades')}"
+            )
 
     def on_open_trades_file(self):
         path = Path(getattr(self, 'var_trades_path', tk.StringVar(value=str(RESULTS / 'trades_log.csv'))).get())
