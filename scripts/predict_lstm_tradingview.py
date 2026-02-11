@@ -338,8 +338,9 @@ def predict(timeframe: str,
             print("[WARN] Nepodařilo se zarovnat na scaler:", e, flush=True)
 
     # --- Two-stage výchozí seznamy (až TEĎ už existuje feature_cols) ---
-    fcols_trade = ts.get("feature_cols_trade") or feature_cols
-    fcols_dir   = ts.get("feature_cols_dir")   or feature_cols
+    # Preferuj feature_cols_* z two_stage; fallback na top-level; pak obecné feature_cols.
+    fcols_trade = ts.get("feature_cols_trade") or meta.get("feature_cols_trade") or feature_cols
+    fcols_dir   = ts.get("feature_cols_dir")   or meta.get("feature_cols_dir")   or feature_cols
 
     scaler_path_trade = os.path.join(ROOT_DIR, ts.get("scaler_path_trade") or meta.get("scaler_path", f"models/scaler_tv_{timeframe}.pkl"))
     scaler_path_dir   = os.path.join(ROOT_DIR, ts.get("scaler_path_dir")   or meta.get("scaler_path", f"models/scaler_tv_{timeframe}.pkl"))
@@ -411,13 +412,18 @@ def predict(timeframe: str,
     if extra:
         print("[DBG] TRADE extra cols (ignorovány):", extra[:10], flush=True)
 
-    X_tr = gold_trade[fcols_trade].copy().ffill().bfill().values.astype(float)
-
     print("[DBG] scaler_path_trade =", _short(scaler_path_trade), flush=True)
     print("[DBG] scaler_trade.n_features_in_ =", nfi_trade, "| fcols_trade len =", len(fcols_trade), flush=True)
     if nfi_trade is not None and nfi_trade != len(fcols_trade):
-        raise ValueError(f"[TRADE] Nesoulad: scaler očekává {nfi_trade} featur, ale fcols_trade má {len(fcols_trade)}. "
-                         f"Oprav meta JSON nebo použij odpovídající scaler.")
+        rebuilt_trade = _infer_feature_cols_from_features(gold_trade, feats_trade)
+        if len(rebuilt_trade) == nfi_trade:
+            print(f"[WARN] [TRADE] Opravuji fcols_trade z {len(fcols_trade)} na {len(rebuilt_trade)} podle features_trade.", flush=True)
+            fcols_trade = rebuilt_trade
+        else:
+            raise ValueError(f"[TRADE] Nesoulad: scaler očekává {nfi_trade} featur, ale fcols_trade má {len(fcols_trade)}. "
+                             f"Oprav meta JSON nebo použij odpovídající scaler.")
+
+    X_tr = gold_trade[fcols_trade].copy().ffill().bfill().values.astype(float)
 
     print("[DBG] TRADE fcols len =", len(fcols_trade), "| X_tr shape =", X_tr.shape, flush=True)
     if nfi_trade is not None and nfi_trade != X_tr.shape[1]:
@@ -446,13 +452,18 @@ def predict(timeframe: str,
     if extra_dir:
         print("[DBG] DIR   extra cols (ignorovány):", extra_dir[:10], flush=True)
 
-    X_dir = gold_dir[fcols_dir].copy().ffill().bfill().values.astype(float)
-
     print("[DBG] scaler_path_dir   =", _short(scaler_path_dir), flush=True)
     print("[DBG] scaler_dir.n_features_in_   =", nfi_dir, "| fcols_dir   len =", len(fcols_dir), flush=True)
     if nfi_dir is not None and nfi_dir != len(fcols_dir):
-        raise ValueError(f"[DIR] Nesoulad: scaler očekává {nfi_dir} featur, ale fcols_dir má {len(fcols_dir)}. "
-                         f"Oprav meta JSON nebo použij odpovídající scaler.")
+        rebuilt_dir = _infer_feature_cols_from_features(gold_dir, feats_dir)
+        if len(rebuilt_dir) == nfi_dir:
+            print(f"[WARN] [DIR] Opravuji fcols_dir z {len(fcols_dir)} na {len(rebuilt_dir)} podle features_dir.", flush=True)
+            fcols_dir = rebuilt_dir
+        else:
+            raise ValueError(f"[DIR] Nesoulad: scaler očekává {nfi_dir} featur, ale fcols_dir má {len(fcols_dir)}. "
+                             f"Oprav meta JSON nebo použij odpovídající scaler.")
+
+    X_dir = gold_dir[fcols_dir].copy().ffill().bfill().values.astype(float)
 
     print("[DBG] DIR   fcols len =", len(fcols_dir), "| X_dir shape =", X_dir.shape, flush=True)
     if nfi_dir is not None and nfi_dir != X_dir.shape[1]:
