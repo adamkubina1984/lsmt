@@ -704,10 +704,8 @@ class TradingGUI(tk.Tk):
         if not FETCH_SCRIPT.exists():
             messagebox.showerror("Chyba", f"Nenalezen {FETCH_SCRIPT}")
             return
-        cmd = [self.py(), str(FETCH_SCRIPT),
-               "--symbol", getattr(self, 'var_symbol', tk.StringVar(value='GOLD')).get(),
-               "--exchange", getattr(self, 'var_exchange', tk.StringVar(value='TVC')).get(),
-               "--base", getattr(self, 'var_base', tk.StringVar(value='gold')).get()]
+        # fetch_tradingview_data.py aktuálně běží bez CLI argumentů
+        cmd = [self.py(), str(FETCH_SCRIPT)]
         run_cmd(cmd, self.log_async, ROOT)
 
     def on_train(self):
@@ -798,7 +796,7 @@ class TradingGUI(tk.Tk):
         # --features: posílej jen když je zdroj indikátorů „ruční“
         features = None if (self.var_feat_source.get() == "auto") else self.get_selected_indicators()
         if features:
-        cmd += ["--features", ",".join(features)]
+            cmd += ["--features", ",".join(features)]
         if use_ts:
             cmd.append("--use_two_stage")
 
@@ -927,14 +925,10 @@ class TradingGUI(tk.Tk):
             self.py(), str(LIVE_SCRIPT),
             "--timeframe", self.var_tf.get(),
             "--min_conf",  f"{getattr(self,'var_minc', tk.DoubleVar(value=0.55)).get():.2f}",
-            "--buffer_sec","10",
-            "--auto_fetch",
-            "--update_plot",
-            "--plot_window","100"
+            "--poll_sec", "10"
         ]
         if getattr(self,'var_allow_short', tk.BooleanVar(value=True)).get():
             cmd.append("--allow_short")
-        cmd += ["--poll_sec", "10"]
         try:
             self._live_proc = subprocess.Popen(
                 cmd, cwd=str(ROOT),
@@ -949,9 +943,9 @@ class TradingGUI(tk.Tk):
         try:
             for line in self._live_proc.stdout:
                 if line is None: break
-                self.log(line.rstrip())
+                self.log_async(line.rstrip())
         except Exception as e:
-            self.log(f"[VÝJIMKA Live] {e}")
+            self.log_async(f"[VÝJIMKA Live] {e}")
 
     def on_live_stop(self):
         if self._live_proc and self._live_proc.poll() is None:
