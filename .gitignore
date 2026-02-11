@@ -1,0 +1,37 @@
+﻿# Python cache/build
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tool caches
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment files
+.env
+.env.*
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ML artifacts and generated outputs
+models/
+results/
+data/raw/
+*.h5
+*.pkl
+*.joblib
+*.onnx
