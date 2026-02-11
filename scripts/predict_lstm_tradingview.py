@@ -260,18 +260,12 @@ def predict(timeframe: str,
     wanted_feats = [f.strip().lower() for f in (features if features else meta.get("features", ["rsi","macd","ema20","bb","atr"]))]
     ts = meta.get("two_stage", {})
 
-    # Rozhodnutí o two-stage: jen pokud jsou k dispozici oba modely
+    # Two-stage je explicitní režim řízený jen CLI flagem.
     req_trade = ts.get("model_path_trade")
     req_dir   = ts.get("model_path_dir")
-
-    if (ts.get("enabled") or use_two_stage):
-        if not req_trade or not req_dir:
-            print("[WARN] Two-stage vyžádáno, ale v metadata.two_stage chybí model_path_trade/dir -> padám na single-stage.", flush=True)
-            use_two_stage = False
-        else:
-            use_two_stage = True
-    else:
-        use_two_stage = False
+    use_two_stage = bool(use_two_stage)
+    if use_two_stage and (not req_trade or not req_dir):
+        raise ValueError("Two-stage režim vyžádán, ale v metadata.two_stage chybí model_path_trade/model_path_dir.")
 
     min_conf_trade = float(ts.get("min_conf_trade", 0.48))
     min_conf_dir = float(ts.get("min_conf_dir", 0.55))
@@ -349,10 +343,9 @@ def predict(timeframe: str,
         except Exception as e:
             print("[WARN] Nepodařilo se zarovnat na scaler:", e, flush=True)
 
-    # --- Two-stage výchozí seznamy (až TEĎ už existuje feature_cols) ---
-    # Preferuj feature_cols_* z two_stage; fallback na top-level; pak obecné feature_cols.
-    fcols_trade = ts.get("feature_cols_trade") or meta.get("feature_cols_trade") or feature_cols
-    fcols_dir   = ts.get("feature_cols_dir")   or meta.get("feature_cols_dir")   or feature_cols
+    # --- Two-stage feature seznamy (povinné jen v two-stage režimu) ---
+    fcols_trade = ts.get("feature_cols_trade")
+    fcols_dir   = ts.get("feature_cols_dir")
 
     scaler_path_trade = os.path.join(ROOT_DIR, ts.get("scaler_path_trade") or meta.get("scaler_path", f"models/scaler_tv_{timeframe}.pkl"))
     scaler_path_dir   = os.path.join(ROOT_DIR, ts.get("scaler_path_dir")   or meta.get("scaler_path", f"models/scaler_tv_{timeframe}.pkl"))
@@ -397,19 +390,23 @@ def predict(timeframe: str,
             out.loc[mask_weak, "signal"] = 0
 
         out = out[["date", "close", "signal", "signal_strength", "proba_no_trade", "proba_buy", "proba_sell"]]
+        _log_signal_distribution(out)
+        if (out["signal"] != 0).sum() == 0:
+            print("[WARN] Predikce obsahuje jen NO-TRADE signály.", flush=True)
         out.to_csv(out_csv, index=False)
         print(f"[OK] Predikce (multi) uložena: {out_csv}")
         return  # konec single-stage
 
     # === TWO-STAGE (Trade → Direction) ===
 
-    # 0) Případné přepsání fcols podle companion JSON vedle scaleru
+    # 0) Načti two-stage scalery
     scaler_trade = joblib.load(scaler_path_trade)
     scaler_dir = joblib.load(scaler_path_dir)
     nfi_trade = getattr(scaler_trade, "n_features_in_", None)
     nfi_dir = getattr(scaler_dir, "n_features_in_", None)
-    fcols_trade = _maybe_override_feature_cols_from_companion(scaler_path_trade, fcols_trade, "trade")
-    fcols_dir = _maybe_override_feature_cols_from_companion(scaler_path_dir, fcols_dir, "dir")
+
+    if not fcols_trade or not fcols_dir:
+        raise ValueError("Two-stage režim vyžaduje metadata.two_stage.feature_cols_trade a feature_cols_dir.")
 
     # 1) TRADE / NO-TRADE
     gold_trade = add_indicators(gold.copy(), feats_trade)
@@ -427,13 +424,8 @@ def predict(timeframe: str,
     print("[DBG] scaler_path_trade =", _short(scaler_path_trade), flush=True)
     print("[DBG] scaler_trade.n_features_in_ =", nfi_trade, "| fcols_trade len =", len(fcols_trade), flush=True)
     if nfi_trade is not None and nfi_trade != len(fcols_trade):
-        rebuilt_trade = _infer_feature_cols_from_features(gold_trade, feats_trade)
-        if len(rebuilt_trade) == nfi_trade:
-            print(f"[WARN] [TRADE] Opravuji fcols_trade z {len(fcols_trade)} na {len(rebuilt_trade)} podle features_trade.", flush=True)
-            fcols_trade = rebuilt_trade
-        else:
-            raise ValueError(f"[TRADE] Nesoulad: scaler očekává {nfi_trade} featur, ale fcols_trade má {len(fcols_trade)}. "
-                             f"Oprav meta JSON nebo použij odpovídající scaler.")
+        raise ValueError(f"[TRADE] Nesoulad: scaler očekává {nfi_trade} featur, ale feature_cols_trade má {len(fcols_trade)}. "
+                         f"Oprav metadata.two_stage.feature_cols_trade.")
 
     X_tr = gold_trade[fcols_trade].copy().ffill().bfill().values.astype(float)
 
@@ -467,13 +459,8 @@ def predict(timeframe: str,
     print("[DBG] scaler_path_dir   =", _short(scaler_path_dir), flush=True)
     print("[DBG] scaler_dir.n_features_in_   =", nfi_dir, "| fcols_dir   len =", len(fcols_dir), flush=True)
     if nfi_dir is not None and nfi_dir != len(fcols_dir):
-        rebuilt_dir = _infer_feature_cols_from_features(gold_dir, feats_dir)
-        if len(rebuilt_dir) == nfi_dir:
-            print(f"[WARN] [DIR] Opravuji fcols_dir z {len(fcols_dir)} na {len(rebuilt_dir)} podle features_dir.", flush=True)
-            fcols_dir = rebuilt_dir
-        else:
-            raise ValueError(f"[DIR] Nesoulad: scaler očekává {nfi_dir} featur, ale fcols_dir má {len(fcols_dir)}. "
-                             f"Oprav meta JSON nebo použij odpovídající scaler.")
+        raise ValueError(f"[DIR] Nesoulad: scaler očekává {nfi_dir} featur, ale feature_cols_dir má {len(fcols_dir)}. "
+                         f"Oprav metadata.two_stage.feature_cols_dir.")
 
     X_dir = gold_dir[fcols_dir].copy().ffill().bfill().values.astype(float)
 
@@ -525,6 +512,9 @@ def predict(timeframe: str,
         out.loc[mask_weak, "signal"] = 0
 
     out = out[["date", "close", "signal", "signal_strength", "proba_no_trade", "proba_buy", "proba_sell"]]
+    _log_signal_distribution(out)
+    if (out["signal"] != 0).sum() == 0:
+        print("[WARN] Predikce obsahuje jen NO-TRADE signály.", flush=True)
     out.to_csv(out_csv, index=False)
     print(f"[OK] Predikce (two-stage) uložena: {out_csv}")
 
