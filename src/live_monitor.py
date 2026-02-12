@@ -2,7 +2,7 @@
 # Rychlý, neblokující Live Monitor s jasným doporučením BUY/SELL/NO TRADE,
 # oddělené vlákno pro fetch/predict, UI průběžně renderuje bez zamrznutí.
 
-import os, sys, time, threading, queue, subprocess
+import os, sys, time, threading, queue, subprocess, csv
 from pathlib import Path
 from datetime import datetime, timedelta
 import tkinter as tk
@@ -92,38 +92,50 @@ class LiveWorker(threading.Thread):
 
                 df = pd.merge_asof(
                     gold.sort_values("date"),
-                    preds.sort_values("date")[["date", "signal", "signal_strength", "proba_no_trade", "proba_buy", "proba_sell"]],
+                    preds.sort_values("date")[[c for c in ["date","signal","signal_strength","proba_no_trade","proba_trade","proba_buy","proba_sell","vol_dead","atr_norm","bb_width"] if c in preds.columns]],
                     on="date",
                     direction="backward"
                 ).iloc[-2000:]
 
-                # === Nová logika rozhodování ===
+                # === Rozhodnutí beru přímo z predikčního CSV (signal + signal_strength) ===
                 last_row = df.iloc[-1]
-                conf_buy = float(last_row.get("proba_buy", 0))
-                conf_sell = float(last_row.get("proba_sell", 0))
-                min_conf = self.cfg.get("min_conf", 0.5)
+                last_dt = last_row.get("date")
+                try:
+                    sig = int(last_row.get("signal", 0))
+                except Exception:
+                    sig = 0
+                try:
+                    conf = float(last_row.get("signal_strength", 0.0))
+                except Exception:
+                    conf = 0.0
 
+                # respektuj volbu short
+                if sig == 2 and not self.cfg.get("allow_short", True):
+                    sig = 0
 
-                if conf_buy > min_conf and conf_buy > conf_sell:
-                    sig = 1 # BUY
-                    conf = conf_buy
-                elif conf_sell > min_conf and conf_sell > conf_buy:
-                    sig = 2 # SELL
-                    conf = conf_sell
-                else:
-                    sig = 0 # NO_TRADE
-                    conf = 1 - max(conf_buy, conf_sell)
+                # detekce nové svíčky (pípnutí / log jen jednou)
+                new_bar = (self._last_bar is None) or (last_dt != self._last_bar)
+                if new_bar:
+                    self._last_bar = last_dt
 
-
-                last_dt = df["date"].iloc[-1]
-                self.q.put({
+                payload = {
                     "df": df,
-                    "new_bar": True,
+                    "new_bar": bool(new_bar),
                     "last_dt": last_dt,
                     "sig": sig,
                     "conf": conf,
+                    "close": float(last_row.get("close", float('nan'))),
+                    "proba_no_trade": float(last_row.get("proba_no_trade", float('nan'))),
+                    "proba_trade": float(last_row.get("proba_trade", float('nan'))),
+                    "proba_buy": float(last_row.get("proba_buy", float('nan'))),
+                    "proba_sell": float(last_row.get("proba_sell", float('nan'))),
+                    "vol_dead": int(last_row.get("vol_dead", 0)) if str(last_row.get("vol_dead", 0)).strip() != '' else 0,
+                    "atr_norm": float(last_row.get("atr_norm", float('nan'))),
+                    "bb_width": float(last_row.get("bb_width", float('nan'))),
                     "msg": f"Updated {last_dt}"
-                })
+                }
+                self.q.put(payload)
+
 
             except Exception as e:
                 self.q.put({"msg": f"Worker error: {e}"})
@@ -157,8 +169,62 @@ class LiveMonitor(tk.Tk):
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.get_tk_widget().pack(fill='both', expand=True, padx=10, pady=6)
 
+        self._last_alert_dt = None
         self.after(500, self.poll_updates)
         self.worker.start()
+
+
+    def _beep_strong(self, signal_id: int):
+        if not self.cfg.get("beep", True):
+            return
+        try:
+            if IS_WIN and winsound is not None:
+                if signal_id == 1:  # BUY
+                    winsound.Beep(1200, 180); winsound.Beep(1500, 180)
+                elif signal_id == 2:  # SELL
+                    winsound.Beep(700, 180); winsound.Beep(500, 180)
+            else:
+                print("", end="", flush=True)
+        except Exception:
+            pass
+
+    def _append_alert_csv(self, payload: dict):
+        if not self.cfg.get("log_csv", True):
+            return
+        out_path = Path(self.cfg.get("alerts_csv") or (RESULTS / f"live_alerts_{self.cfg['timeframe']}.csv"))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        header = [
+            "date", "timeframe", "signal", "signal_strength", "close",
+            "proba_no_trade", "proba_trade", "proba_buy", "proba_sell", "vol_dead", "logged_utc"
+        ]
+
+        write_header = (not out_path.exists())
+        try:
+            with open(out_path, "a", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                if write_header:
+                    w.writerow(header)
+                sig = int(payload.get("sig", 0) or 0)
+                human = "BUY" if sig == 1 else ("SELL" if sig == 2 else "NO_TRADE")
+                dt = payload.get("last_dt")
+                w.writerow([
+                    getattr(dt, "isoformat", lambda: str(dt))(),
+                    self.cfg.get("timeframe"),
+                    human,
+                    f"{float(payload.get('conf', 0.0)):.4f}",
+                    f"{float(payload.get('close', float('nan'))):.4f}",
+                    f"{float(payload.get('proba_no_trade', float('nan'))):.6f}",
+                    f"{float(payload.get('proba_trade', float('nan'))):.6f}",
+                    f"{float(payload.get('proba_buy', float('nan'))):.6f}",
+                    f"{float(payload.get('proba_sell', float('nan'))):.6f}",
+                    int(payload.get('vol_dead', 0) or 0),
+                    datetime.utcnow().isoformat()
+                ])
+        except PermissionError:
+            print(f"[WARN] Nelze zapsat alert CSV (soubor je zřejmě otevřen): {out_path}")
+        except Exception as e:
+            print(f"[WARN] Zápis alert CSV selhal: {e}")
 
     def poll_updates(self):
         try:
@@ -192,8 +258,15 @@ class LiveMonitor(tk.Tk):
 
         # action banner
         lo_thr = self.cfg.get('min_conf_low')
-        strong = (conf >= self.cfg['min_conf'])
-        weak   = (lo_thr is not None) and (conf >= lo_thr) and (not strong)
+        strong = (conf >= self.cfg['min_conf']) and (sig in (1,2)) and (self.cfg['allow_short'] or sig == 1)
+        weak   = (lo_thr is not None) and (conf >= lo_thr) and (not strong) and (sig in (1,2)) and (self.cfg['allow_short'] or sig == 1)
+
+        # ALERT: jen u STRONG a jen při novém baru
+        if new_bar and strong:
+            if (self._last_alert_dt is None) or (last_dt != self._last_alert_dt):
+                self._last_alert_dt = last_dt
+                self._beep_strong(sig)
+                self._append_alert_csv(payload)
 
         if sig==1 and strong:
             self.action_lbl.config(text=f"BUY STRONG ({conf:.2f}) | size≈{self.cfg['trade_pct']*100:.1f}%", bg="#27ae60")
@@ -299,8 +372,6 @@ class LiveMonitor(tk.Tk):
         # 5) Spodní panel: proba_no_trade, proba_buy, proba_sell + threshold + risk
         try:
             has_probs = all(col in df.columns for col in ('proba_no_trade', 'proba_buy', 'proba_sell'))
-            print("[DEBUG] Columns in df:", df.columns.tolist())
-            print("[DEBUG] Has probs:", has_probs)
             if has_probs:
                 y_no_trade = df['proba_no_trade'].fillna(0).clip(0, 1).values
                 y_buy      = df['proba_buy'].fillna(0).clip(0, 1).values
@@ -330,10 +401,7 @@ class LiveMonitor(tk.Tk):
         self.ax_conf.set_xticklabels([dt.strftime('%m-%d %H:%M') for dt in df['date'].iloc[::step]], rotation=0)
 
         self.canvas.draw()
-        if self.cfg.get("min_conf_low") is not None:
-            self.ax_conf.plot(x, np.full(N, self.cfg['min_conf_low']),
-                              color='gray', linestyle='--', alpha=0.5, label=f"min_conf_low {self.cfg['min_conf_low']:.2f}")
-        
+
         # if IS_WIN and winsound and new_bar:
         #     if strong:
         #         winsound.Beep(800, 300)  # vyšší tón
@@ -360,6 +428,9 @@ def main():
     ap.add_argument("--trade-pct", type=float, default=0.05)
     ap.add_argument("--trade-pct-low", type=float, default=0.025)
     ap.add_argument("--beep-weak", action="store_true", help="Pípnout i na slabé signály (krátké).")
+    ap.add_argument("--no-beep", action="store_true", help="Vypnout pípání.")
+    ap.add_argument("--no-log", action="store_true", help="Vypnout logování STRONG alertů do CSV.")
+    ap.add_argument("--alerts-csv", type=str, default=None, help="Cesta k CSV pro STRONG alerty (default results/live_alerts_<tf>.csv)")
     args = ap.parse_args()
 
     cfg = {
@@ -377,6 +448,9 @@ def main():
         'trade_pct'  : args.trade_pct,
         'trade_pct_low': args.trade_pct_low,
         'beep_weak'  : bool(args.beep_weak),
+        'beep'       : (not bool(args.no_beep)),
+        'log_csv'    : (not bool(args.no_log)),
+        'alerts_csv' : args.alerts_csv,
     }
 
     app = LiveMonitor(cfg)

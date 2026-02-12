@@ -205,6 +205,27 @@ def train_lstm(
 
     # --- škálování + sekvence ---
     split_index = int(len(gold) * 0.8)
+    # --- Volatility gate (detekce "mrtvého" trhu) ---
+    vol_filter = {"enabled": False}
+    if "atr_norm" in gold.columns and "bb_width" in gold.columns:
+        q_dead = 0.05  # filtr je záměrně "jemný" – jen opravdu nízká volatilita
+        train_slice = gold.iloc[:split_index]
+        try:
+            thr_atr = float(train_slice["atr_norm"].quantile(q_dead))
+            thr_bb  = float(train_slice["bb_width"].quantile(q_dead))
+            vol_filter = {
+                "enabled": True,
+                "quantile_dead": q_dead,
+                "min_atr_norm": thr_atr,
+                "min_bb_width": thr_bb,
+                "logic": "atr_norm < min_atr_norm AND bb_width < min_bb_width"
+            }
+            print(f"[INFO] Volatility gate (train): atr_norm<{thr_atr:.6f} AND bb_width<{thr_bb:.6f} => DEAD")
+        except Exception as e:
+            print("[WARN] Volatility gate nelze spočítat:", e)
+    else:
+        print("[WARN] Volatility gate: chybí atr_norm/bb_width (přidej indikátory atr a bb).")
+
     if split_index <= seq_len:
         raise ValueError(f"Train split ({split_index}) je příliš malý pro seq_len {seq_len}. Přidej data nebo sniž seq_len.")
     scaler = StandardScaler()
@@ -309,6 +330,7 @@ def train_lstm(
     meta["use_cot"] = bool(use_cot)
     meta["feature_cols"] = feature_cols
     meta["features"] = wanted_feats  # aktuální sada indikátorů (ruční/auto)
+    meta["vol_filter"] = vol_filter
 
     # odkazy pro multi i two-stage
     if mode == "multi":
@@ -320,10 +342,14 @@ def train_lstm(
             ts["model_path_trade"]  = os.path.relpath(model_path, ROOT_DIR)
             ts["scaler_path_trade"] = os.path.relpath(scaler_path, ROOT_DIR)
             ts["features_trade"]    = wanted_feats
+            ts["feature_cols_trade"] = feature_cols
+            meta["feature_cols_trade"] = feature_cols
         elif mode == "direction":
             ts["model_path_dir"]  = os.path.relpath(model_path, ROOT_DIR)
             ts["scaler_path_dir"] = os.path.relpath(scaler_path, ROOT_DIR)
             ts["features_dir"]    = wanted_feats
+            ts["feature_cols_dir"] = feature_cols
+            meta["feature_cols_dir"] = feature_cols
 
         ts["enabled"] = bool(ts.get("model_path_trade")) and bool(ts.get("model_path_dir"))
         ts.setdefault("min_conf_trade", 0.48)

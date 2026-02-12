@@ -233,6 +233,7 @@ def predict(timeframe: str,
             min_conf: float = 0.0,
             features: list[str] = None,
             use_two_stage: bool = False,
+            force_single: bool = False,
             use_dxy: bool = False,
             use_cot: bool = False):
 
@@ -258,20 +259,35 @@ def predict(timeframe: str,
 
     # pokud byly featury předány z CLI, mají přednost
     wanted_feats = [f.strip().lower() for f in (features if features else meta.get("features", ["rsi","macd","ema20","bb","atr"]))]
-    ts = meta.get("two_stage", {})
+    ts = meta.get("two_stage", {}) or {}
 
-    # Two-stage je explicitní režim řízený jen CLI flagem.
-    req_trade = ts.get("model_path_trade")
-    req_dir   = ts.get("model_path_dir")
-    use_two_stage = bool(use_two_stage)
-    if use_two_stage and (not req_trade or not req_dir):
-        raise ValueError("Two-stage režim vyžádán, ale v metadata.two_stage chybí model_path_trade/model_path_dir.")
+    # --- Two-stage: CLI má přednost, jinak auto dle metadata.two_stage.enabled ---
+    req_trade = ts.get("model_path_trade") or meta.get("model_path_trade")
+    req_dir   = ts.get("model_path_dir")   or meta.get("model_path_dir")
+    req_scaler_trade = ts.get("scaler_path_trade") or meta.get("scaler_path_trade")
+    req_scaler_dir   = ts.get("scaler_path_dir")   or meta.get("scaler_path_dir")
 
-    min_conf_trade = float(ts.get("min_conf_trade", 0.48))
-    min_conf_dir = float(ts.get("min_conf_dir", 0.55))
-    min_margin_dir = float(ts.get("min_margin_dir", 0.05))
-    feats_trade = ts.get("features_trade") or wanted_feats
-    feats_dir = ts.get("features_dir") or wanted_feats
+    auto_two_stage = bool(ts.get("enabled")) and bool(req_trade) and bool(req_dir) and bool(req_scaler_trade) and bool(req_scaler_dir)
+
+    cli_two_stage = bool(use_two_stage)
+    if force_single:
+        use_two_stage = False
+        print("[INFO] Single-stage FORCED (--force_single).", flush=True)
+    elif (not cli_two_stage) and auto_two_stage:
+        use_two_stage = True
+        print("[INFO] Two-stage AUTO: metadata.two_stage.enabled = true", flush=True)
+    else:
+        use_two_stage = cli_two_stage
+
+    if use_two_stage and not (req_trade and req_dir and req_scaler_trade and req_scaler_dir):
+        raise ValueError("Two-stage režim je aktivní, ale chybí model/scaler cesty v metadatech (two_stage.*).")
+
+    min_conf_trade = float(ts.get("min_conf_trade", meta.get("min_conf_trade", 0.48)))
+    min_conf_dir   = float(ts.get("min_conf_dir",   meta.get("min_conf_dir",   0.55)))
+    min_margin_dir = float(ts.get("min_margin_dir", meta.get("min_margin_dir", 0.05)))
+
+    feats_trade = [f.strip().lower() for f in (ts.get("features_trade") or meta.get("features_trade") or wanted_feats)]
+    feats_dir   = [f.strip().lower() for f in (ts.get("features_dir")   or meta.get("features_dir")   or wanted_feats)]
 
     # === DATA ===
     gold_path = os.path.join(DATA_DIR, f"gold_{'5m' if timeframe == '5m' else '1h'}.csv")
@@ -318,37 +334,34 @@ def predict(timeframe: str,
         gold["cot"] = 0.0
     for c in ("vix", "dxy", "cot"):
         gold[c] = gold[c].ffill().bfill()
-
-    # === SCALER (společný pro single-stage) ===
-    scaler = joblib.load(scaler_path)
-
-    # --- feature_cols: z meta nebo bezpečný dopočet z features + zarovnání na scaler ---
+    # === SCALER/feature_cols (pouze pro single-stage) ===
     feature_cols = meta.get("feature_cols")
-    if not feature_cols:
-        gold_tmp = add_indicators(gold.copy(), wanted_feats)
-        feature_cols = _infer_feature_cols_from_features(gold_tmp, wanted_feats)
-        try:
-            sc_tmp = joblib.load(scaler_path)
-            nfi = getattr(sc_tmp, "n_features_in_", None)
-            if nfi is not None:
-                candidates = ["bb_pos","bb_width","bb_ma","bb_up","bb_lo","rsi14","ema100","ema100_dist","adx","stoch_k","stoch_d","vwap","sar"]
-                for c in candidates:
-                    if len(feature_cols) >= nfi:
-                        break
-                    if c in gold_tmp.columns and c not in feature_cols:
-                        feature_cols.append(c)
-                if len(feature_cols) > nfi:
-                    feature_cols = feature_cols[:nfi]
-            print(f"[INFO] feature_cols inferováno ({len(feature_cols)} sloupců) z features={wanted_feats}", flush=True)
-        except Exception as e:
-            print("[WARN] Nepodařilo se zarovnat na scaler:", e, flush=True)
+    scaler = None
+    if not use_two_stage:
+        scaler = joblib.load(scaler_path)
+        # --- feature_cols: z meta nebo bezpečný dopočet z features + zarovnání na scaler ---
+        if not feature_cols:
+            gold_tmp = add_indicators(gold.copy(), wanted_feats)
+            feature_cols = _infer_feature_cols_from_features(gold_tmp, wanted_feats)
+            try:
+                sc_tmp = joblib.load(scaler_path)
+                nfi = getattr(sc_tmp, "n_features_in_", None)
+                if nfi is not None:
+                    candidates = ["bb_pos","bb_width","bb_ma","bb_up","bb_lo","rsi14","ema100","ema100_dist","adx","stoch_k","stoch_d","vwap","sar"]
+                    for c in candidates:
+                        if len(feature_cols) >= nfi:
+                            break
+                        if c in gold_tmp.columns and c not in feature_cols:
+                            feature_cols.append(c)
+                    if len(feature_cols) > nfi:
+                        feature_cols = feature_cols[:nfi]
+                print(f"[INFO] feature_cols inferováno ({len(feature_cols)} sloupců) z features={wanted_feats}", flush=True)
+            except Exception as e:
+                print("[WARN] Nepodařilo se zarovnat na scaler:", e, flush=True)
 
-    # --- Two-stage feature seznamy (povinné jen v two-stage režimu) ---
-    fcols_trade = ts.get("feature_cols_trade")
-    fcols_dir   = ts.get("feature_cols_dir")
-
-    scaler_path_trade = os.path.join(ROOT_DIR, ts.get("scaler_path_trade") or meta.get("scaler_path", f"models/scaler_tv_{timeframe}.pkl"))
-    scaler_path_dir   = os.path.join(ROOT_DIR, ts.get("scaler_path_dir")   or meta.get("scaler_path", f"models/scaler_tv_{timeframe}.pkl"))
+    # === Two-stage scaler paths ===
+    scaler_path_trade = os.path.join(ROOT_DIR, req_scaler_trade) if req_scaler_trade else None
+    scaler_path_dir   = os.path.join(ROOT_DIR, req_scaler_dir) if req_scaler_dir else None
 
 
     # === MULTI-CLASS (původní) — jen pokud není two-stage ===
@@ -396,122 +409,134 @@ def predict(timeframe: str,
         out.to_csv(out_csv, index=False)
         print(f"[OK] Predikce (multi) uložena: {out_csv}")
         return  # konec single-stage
-
     # === TWO-STAGE (Trade → Direction) ===
 
     # 0) Načti two-stage scalery
     scaler_trade = joblib.load(scaler_path_trade)
-    scaler_dir = joblib.load(scaler_path_dir)
+    scaler_dir   = joblib.load(scaler_path_dir)
     nfi_trade = getattr(scaler_trade, "n_features_in_", None)
-    nfi_dir = getattr(scaler_dir, "n_features_in_", None)
+    nfi_dir   = getattr(scaler_dir,   "n_features_in_", None)
 
+    # --- feature_cols_trade/dir: beru z meta.two_stage nebo fallback z top-level meta ---
+    fcols_trade = ts.get("feature_cols_trade") or meta.get("feature_cols_trade")
+    fcols_dir   = ts.get("feature_cols_dir")   or meta.get("feature_cols_dir")
     if not fcols_trade or not fcols_dir:
-        raise ValueError("Two-stage režim vyžaduje metadata.two_stage.feature_cols_trade a feature_cols_dir.")
+        raise ValueError("Two-stage režim vyžaduje feature_cols_trade a feature_cols_dir (v meta.two_stage nebo na top-level metadatech).")
 
-    # 1) TRADE / NO-TRADE
-    gold_trade = add_indicators(gold.copy(), feats_trade)
+    # 1) Společný základ featur – indikátory počítáme JEDNOU (bez časového rozjetí)
+    union_feats = []
+    for f in (feats_trade + feats_dir):
+        f = (f or "").strip().lower()
+        if f and f not in union_feats:
+            union_feats.append(f)
+
+    # Volatility gate potřebuje atr + bb (když chybí v union, doplním)
+    for f in ("atr", "bb"):
+        if f not in union_feats:
+            union_feats.append(f)
+
+    gold_feat = add_indicators(gold.copy(), union_feats)
+
+    # 2) Volatility gate: opravdu mrtvý trh -> NO-TRADE
+    vol_cfg = (meta.get("vol_filter") or ts.get("vol_filter") or {})
+    q_dead = float(vol_cfg.get("quantile_dead", 0.05))
+    thr_atr = vol_cfg.get("min_atr_norm")
+    thr_bb  = vol_cfg.get("min_bb_width")
+    if ("atr_norm" in gold_feat.columns) and ("bb_width" in gold_feat.columns):
+        thr_atr = float(thr_atr) if thr_atr is not None else float(gold_feat["atr_norm"].quantile(q_dead))
+        thr_bb  = float(thr_bb)  if thr_bb  is not None else float(gold_feat["bb_width"].quantile(q_dead))
+        gold_feat["vol_dead"] = ((gold_feat["atr_norm"] < thr_atr) & (gold_feat["bb_width"] < thr_bb)).astype(int)
+    else:
+        gold_feat["vol_dead"] = 0
+
+    # 3) Připrav featury pro trade a direction (fill chybějících sloupců)
     for col in fcols_trade:
-        if col not in gold_trade.columns:
-            gold_trade[col] = gold[col] if col in gold.columns else 0.0
+        if col not in gold_feat.columns:
+            gold_feat[col] = gold[col] if col in gold.columns else 0.0
+    for col in fcols_dir:
+        if col not in gold_feat.columns:
+            gold_feat[col] = gold[col] if col in gold.columns else 0.0
 
-    missing = [c for c in fcols_trade if c not in gold_trade.columns]
-    extra = [c for c in gold_trade.columns if c not in fcols_trade]
-    if missing:
-        raise RuntimeError(f"[TRADE] Chybí featury: {missing}. Doplň je ve features.add_indicators/merge makro dat.")
-    if extra:
-        print("[DBG] TRADE extra cols (ignorovány):", extra[:10], flush=True)
-
-    print("[DBG] scaler_path_trade =", _short(scaler_path_trade), flush=True)
-    print("[DBG] scaler_trade.n_features_in_ =", nfi_trade, "| fcols_trade len =", len(fcols_trade), flush=True)
     if nfi_trade is not None and nfi_trade != len(fcols_trade):
-        raise ValueError(f"[TRADE] Nesoulad: scaler očekává {nfi_trade} featur, ale feature_cols_trade má {len(fcols_trade)}. "
-                         f"Oprav metadata.two_stage.feature_cols_trade.")
+        raise ValueError(f"[TRADE] Nesoulad: scaler očekává {nfi_trade} featur, ale feature_cols_trade má {len(fcols_trade)}.")
+    if nfi_dir is not None and nfi_dir != len(fcols_dir):
+        raise ValueError(f"[DIR] Nesoulad: scaler očekává {nfi_dir} featur, ale feature_cols_dir má {len(fcols_dir)}.")
 
-    X_tr = gold_trade[fcols_trade].copy().ffill().bfill().values.astype(float)
-
-    print("[DBG] TRADE fcols len =", len(fcols_trade), "| X_tr shape =", X_tr.shape, flush=True)
-    if nfi_trade is not None and nfi_trade != X_tr.shape[1]:
-        raise ValueError(f"[TRADE] Počet featur nesedí: scaler očekává {nfi_trade}, ale X_tr má {X_tr.shape[1]}. "
-                         f"Zkontroluj feature_cols_trade v meta a výpočet indikátorů.")
+    X_tr = gold_feat[fcols_trade].copy().ffill().bfill().values.astype(float)
+    X_dir = gold_feat[fcols_dir].copy().ffill().bfill().values.astype(float)
 
     X_tr_scaled = scaler_trade.transform(X_tr)
-    X_tr_seqs, _ = _build_sequences(X_tr_scaled, seq_len)
-    model_path_trade = ts.get("model_path_trade")
-    if not model_path_trade:
-        raise KeyError("V metadata.two_stage chybí 'model_path_trade'.")
-    model_trade = load_model(os.path.join(ROOT_DIR, model_path_trade))
-    p_trade = model_trade.predict(X_tr_seqs, verbose=0).reshape(-1)
-    mask_trade = (p_trade >= min_conf_trade)
-
-    # 2) DIRECTION (BUY vs SELL) – jen tam, kde trade prošel
-    gold_dir = add_indicators(gold.copy(), feats_dir)
-    for col in fcols_dir:
-        if col not in gold_dir.columns:
-            gold_dir[col] = gold[col] if col in gold.columns else 0.0
-
-    missing_dir = [c for c in fcols_dir if c not in gold_dir.columns]
-    extra_dir = [c for c in gold_dir.columns if c not in fcols_dir]
-    if missing_dir:
-        raise RuntimeError(f"[DIR] Chybí featury: {missing_dir}. Doplň je ve features.add_indicators/merge makro dat.")
-    if extra_dir:
-        print("[DBG] DIR   extra cols (ignorovány):", extra_dir[:10], flush=True)
-
-    print("[DBG] scaler_path_dir   =", _short(scaler_path_dir), flush=True)
-    print("[DBG] scaler_dir.n_features_in_   =", nfi_dir, "| fcols_dir   len =", len(fcols_dir), flush=True)
-    if nfi_dir is not None and nfi_dir != len(fcols_dir):
-        raise ValueError(f"[DIR] Nesoulad: scaler očekává {nfi_dir} featur, ale feature_cols_dir má {len(fcols_dir)}. "
-                         f"Oprav metadata.two_stage.feature_cols_dir.")
-
-    X_dir = gold_dir[fcols_dir].copy().ffill().bfill().values.astype(float)
-
-    print("[DBG] DIR   fcols len =", len(fcols_dir), "| X_dir shape =", X_dir.shape, flush=True)
-    if nfi_dir is not None and nfi_dir != X_dir.shape[1]:
-        raise ValueError(f"[DIR] Počet featur nesedí: scaler očekává {nfi_dir}, ale X_dir má {X_dir.shape[1]}. "
-                         f"Zkontroluj feature_cols_dir v meta a výpočet indikátorů.")
-
     X_dir_scaled = scaler_dir.transform(X_dir)
-    X_dir_seqs, _ = _build_sequences(X_dir_scaled, seq_len)
-    model_path_dir = ts.get("model_path_dir")
-    if not model_path_dir:
-        raise KeyError("V metadata.two_stage chybí 'model_path_dir'.")
-    model_dir = load_model(os.path.join(ROOT_DIR, model_path_dir))
-    p_buy = model_dir.predict(X_dir_seqs, verbose=0).reshape(-1)
-    p_sell = 1.0 - p_buy
 
-    # 3) Rekonstrukce výstupu
-    out = gold.iloc[seq_len - 1:].copy().reset_index(drop=True)
+    X_tr_seqs, _ = _build_sequences(X_tr_scaled, seq_len)
+    X_dir_seqs, _ = _build_sequences(X_dir_scaled, seq_len)
+    if X_tr_seqs.shape[0] == 0 or X_dir_seqs.shape[0] == 0:
+        raise ValueError("Příliš málo dat pro sekvenci – zvýš počet barů nebo sniž seq_len.")
+
+    # 4) Predikce
+    model_trade = load_model(os.path.join(ROOT_DIR, req_trade))
+    model_dir   = load_model(os.path.join(ROOT_DIR, req_dir))
+
+    p_trade = model_trade.predict(X_tr_seqs, verbose=0).reshape(-1)
+    p_buy   = model_dir.predict(X_dir_seqs, verbose=0).reshape(-1)
+    p_sell  = 1.0 - p_buy
+
+    # 5) Rekonstrukce výstupu – 1 řádek na uzavřený bar (end of seq)
+    out = gold_feat.iloc[seq_len - 1:].copy().reset_index(drop=True)
     n = min(len(out), len(p_trade), len(p_buy))
     out = out.iloc[:n]
 
+    out["proba_trade"] = p_trade[:n]
     out["proba_no_trade"] = 1.0 - p_trade[:n]
     out["proba_buy"] = 0.0
     out["proba_sell"] = 0.0
     out["signal"] = 0
-    out["signal_strength"] = 0.0
 
-    idx = np.where(mask_trade[:n])[0]
+    mask_trade = (p_trade[:n] >= min_conf_trade)
+    idx = np.where(mask_trade)[0]
     if idx.size > 0:
-        # směrové konfidence
-        out.loc[idx, "proba_buy"] = p_buy[idx]
+        out.loc[idx, "proba_buy"]  = p_buy[idx]
         out.loc[idx, "proba_sell"] = p_sell[idx]
+
         dir_conf = np.maximum(p_buy[idx], p_sell[idx])
         margin = np.abs(p_buy[idx] - p_sell[idx])
-
         ok_dir = (dir_conf >= min_conf_dir) & (margin >= min_margin_dir)
-        ok_buy = ok_dir & (p_buy[idx] > p_sell[idx])
+
+        ok_buy  = ok_dir & (p_buy[idx] > p_sell[idx])
         ok_sell = ok_dir & (p_sell[idx] > p_buy[idx])
 
-        out.loc[idx[ok_buy], "signal"] = 1
-        out.loc[idx[ok_buy], "signal_strength"] = p_buy[idx][ok_buy]
+        out.loc[idx[ok_buy],  "signal"] = 1
         out.loc[idx[ok_sell], "signal"] = 2
-        out.loc[idx[ok_sell], "signal_strength"] = p_sell[idx][ok_sell]
 
-    # globální min_conf filtr (volitelný)
+    # 6) Volatility gate: mrtvý trh -> NO-TRADE
+    if "vol_dead" in out.columns:
+        dead = out["vol_dead"].astype(bool).values
+        if dead.any():
+            out.loc[dead, "signal"] = 0
+            out.loc[dead, "proba_trade"] = 0.0
+            out.loc[dead, "proba_no_trade"] = 1.0
+            out.loc[dead, "proba_buy"] = 0.0
+            out.loc[dead, "proba_sell"] = 0.0
+
+    # 7) signal_strength = konfidence vybraného rozhodnutí
+    out["signal_strength"] = np.where(
+        out["signal"] == 1, out["proba_buy"],
+        np.where(out["signal"] == 2, out["proba_sell"], out["proba_no_trade"])
+    )
+
+    # globální min_conf filtr (jen na BUY/SELL)
     if min_conf > 0:
-        mask_weak = out["signal_strength"] < min_conf
+        mask_weak = out["signal"].isin([1,2]) & (out["signal_strength"] < min_conf)
         out.loc[mask_weak, "signal"] = 0
+        out.loc[mask_weak, "signal_strength"] = out.loc[mask_weak, "proba_no_trade"]
 
-    out = out[["date", "close", "signal", "signal_strength", "proba_no_trade", "proba_buy", "proba_sell"]]
+    # výstupní sloupce
+    cols = ["date", "close", "signal", "signal_strength", "proba_no_trade", "proba_trade", "proba_buy", "proba_sell", "vol_dead"]
+    for c in ("atr_norm", "bb_width"):
+        if c in out.columns and c not in cols:
+            cols.append(c)
+
+    out = out[[c for c in cols if c in out.columns]]
     _log_signal_distribution(out)
     if (out["signal"] != 0).sum() == 0:
         print("[WARN] Predikce obsahuje jen NO-TRADE signály.", flush=True)
@@ -526,6 +551,7 @@ if __name__ == "__main__":
     parser.add_argument("--min_conf", type=float, default=0.0, help="Filtr síly signálu (0–1)")
     parser.add_argument("--features", type=str, default=None, help="Seznam indikátorů oddělených čárkou (např. rsi,macd,ema20)")
     parser.add_argument("--use_two_stage", action="store_true", help="Použít dvoustupňovou inferenci (Trade→Direction).")
+    parser.add_argument("--force_single", action="store_true", help="Vynutit single-stage inferenci (ignoruje auto two-stage z metadata).")
     parser.add_argument("--use_dxy", action="store_true", help="Zapnout DXY feature i bez metadata flagu.")
     parser.add_argument("--use_cot", action="store_true", help="Zapnout COT feature i bez metadata flagu.")
 
@@ -537,5 +563,6 @@ if __name__ == "__main__":
             min_conf=args.min_conf,
             features=features_list,
             use_two_stage=args.use_two_stage,
+            force_single=args.force_single,
             use_dxy=args.use_dxy,
             use_cot=args.use_cot)

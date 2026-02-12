@@ -84,6 +84,34 @@ def run_cmd(cmd: list, log_func, cwd: Path = None):
             log_func(f"[VÝJIMKA] {e}")
     threading.Thread(target=_runner, daemon=True).start()
 
+def run_cmd_sequence(cmds: list[list], log_func, cwd: Path = None):
+    """Spustí více příkazů postupně v 1 vlákně a streamuje výstup do GUI logu."""
+    def _runner():
+        for idx, cmd in enumerate(cmds, start=1):
+            log_func(f">>> [{idx}/{len(cmds)}] " + " ".join(str(x) for x in cmd))
+            try:
+                with subprocess.Popen(
+                    [str(c) for c in cmd],
+                    cwd=str(cwd) if cwd else str(ROOT),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                ) as p:
+                    for line in p.stdout:
+                        if line is not None:
+                            log_func(line.rstrip())
+                    ret = p.wait()
+                    if ret == 0:
+                        log_func("[OK] Hotovo.")
+                    else:
+                        log_func(f"[CHYBA] Proces skončil s návratovým kódem {ret}.")
+                        break
+            except Exception as e:
+                log_func(f"[VÝJIMKA] {e}")
+                break
+    threading.Thread(target=_runner, daemon=True).start()
+
 # ---------------------------- GUI ---------------------------
 class TradingGUI(tk.Tk):
     def __init__(self):
@@ -340,40 +368,131 @@ class TradingGUI(tk.Tk):
 
     # ------------------- actions ----------------------
     def on_fetch(self):
+
         if not FETCH_SCRIPT.exists():
             messagebox.showerror("Chyba", f"Nenalezen {FETCH_SCRIPT}")
             return
-        cmd = [self.py(), str(FETCH_SCRIPT),
-               "--symbol", self.var_symbol.get(),
-               "--exchange", self.var_exchange.get(),
-               "--base", self.var_base.get()]
-        run_cmd(cmd, self.log, ROOT)
 
+        bars = int(getattr(self, "var_fetch_bars", tk.IntVar(value=5000)).get())
+        mode = getattr(self, "var_fetch_mode", tk.StringVar(value="append")).get().strip() or "append"
+        use_dxy = bool(getattr(self, "var_fetch_dxy", tk.BooleanVar(value=False)).get())
+        use_cot = bool(getattr(self, "var_fetch_cot", tk.BooleanVar(value=False)).get())
+
+        cmd = [self.py(), str(FETCH_SCRIPT), "--bars", str(bars), "--mode", mode]
+        if use_dxy:
+            cmd.append("--use_dxy")
+        if use_cot:
+            cmd.append("--use_cot")
+
+        run_cmd(cmd, self.log_async, ROOT)
     def on_train(self):
+
         if not TRAIN_SCRIPT.exists():
             messagebox.showerror("Chyba", f"Nenalezen {TRAIN_SCRIPT}")
             return
-        cmd = [
+
+        # Načtení hodnot z GUI
+        seq   = self.var_seq.get()
+        thr   = self.var_thr.get()
+        ep    = self.var_epochs.get()
+        batch = self.var_batch.get()
+        cotsh = getattr(self, "var_cot", tk.IntVar(value=0)).get()
+
+        # Zdroj indikátorů: auto = None (vezme se z metadat), ruční = checkboxy
+        use_auto = (self.var_feat_source.get() == "auto")
+        features = None if use_auto else self.get_selected_indicators()
+
+        base_cmd = [
             self.py(), str(TRAIN_SCRIPT),
             "--timeframe",        self.var_tf.get(),
-            "--seq_len",         f"{self.var_seq.get()}",
-            "--thr_pct",         f"{self.var_thr.get():.2f}",
-            "--epochs",          f"{self.var_epochs.get()}",
-            "--batch_size",      f"{self.var_batch.get()}",
-            "--cot_shift_days",  f"{self.var_cot.get()}",
+            "--seq_len",          str(seq),
+            "--thr_pct",          f"{thr:.2f}",
+            "--epochs",           str(ep),
+            "--batch_size",       str(batch),
+            "--cot_shift_days",   str(cotsh),
         ]
-        run_cmd(cmd, self.log, ROOT)
+        if features:
+            base_cmd += ["--features", ",".join(features)]
 
+        mode = getattr(self, "var_train_mode", tk.StringVar(value="two_stage")).get()
+
+        if mode == "multi":
+            cmd = base_cmd + ["--mode", "multi"]
+            run_cmd(cmd, self.log_async, ROOT)
+            return
+
+        # Two-stage = spustit dva tréninky postupně: trade a direction
+        cmds = [
+            base_cmd + ["--mode", "trade"],
+            base_cmd + ["--mode", "direction"],
+        ]
+        run_cmd_sequence(cmds, self.log_async, ROOT)
     def on_predict(self):
+
         if not PREDICT_SCRIPT.exists():
             messagebox.showerror("Chyba", f"Nenalezen {PREDICT_SCRIPT}")
             return
-        out_csv = RESULTS / f"predictions_{self.var_base.get()}_{self.var_tf.get()}.csv"
-        cmd = [self.py(), str(PREDICT_SCRIPT),
-               "--timeframe", self.var_tf.get(),
-               "--output", str(out_csv)]
-        run_cmd(cmd, self.log, ROOT)
 
+        tf = self.var_tf.get()
+        base = getattr(self, 'var_base', tk.StringVar(value='gold')).get()
+        out_csv = RESULTS / f"predictions_{base}_{tf}.csv"
+
+        # režimy predikce: auto / two-stage / single
+        use_ts = bool(getattr(self, "var_use_two_stage", None) and self.var_use_two_stage.get())
+        force_single = bool(getattr(self, "var_force_single", None) and self.var_force_single.get())
+
+        # pokud je two-stage zapnuto, ulož prahy do metadat a ověř kompletnost modelů
+        if use_ts and (not force_single):
+            try:
+                self._save_two_stage_settings_to_meta()
+            except Exception as e:
+                self.log(f"[VAROVÁNÍ] Uložení two-stage prahů před predikcí selhalo: {e}")
+
+            try:
+                meta_path = ROOT / "models" / f"features_tv_{tf}.json"
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception as e:
+                messagebox.showerror("Two-stage", f"Nelze načíst metadata {meta_path.name}:\n{e}")
+                return
+
+            ts = meta.get("two_stage", {})
+            missing = []
+            for key in ("model_path_trade", "model_path_dir"):
+                v = ts.get(key)
+                if not v:
+                    missing.append(f"{key} (není v JSONu)")
+                else:
+                    p = (ROOT / v)
+                    if not p.exists():
+                        missing.append(f"{key} (soubor nenalezen: {v})")
+
+            if missing:
+                messagebox.showerror(
+                    "Two-stage není připraveno",
+                    "Doplň prosím trénink two-stage modelů (Trade i Direction):\n- " + "\n- ".join(missing)
+                )
+                return
+
+        cmd = [
+            self.py(), str(PREDICT_SCRIPT),
+            "--timeframe", tf,
+            "--output", str(out_csv),
+            "--min_conf", f"{getattr(self,'var_minc', tk.DoubleVar(value=0.55)).get():.4f}"
+        ]
+
+        # --features: posílej jen když je zdroj indikátorů „ruční“
+        features = None if (self.var_feat_source.get() == "auto") else self.get_selected_indicators()
+        if features:
+            cmd += ["--features", ",".join(features)]
+
+        if force_single:
+            cmd.append("--force_single")
+        elif use_ts:
+            cmd.append("--use_two_stage")
+        # else: auto (predict si rozhodne podle meta)
+
+        run_cmd(cmd, self.log_async, ROOT)
     def on_simulate(self):
         if not SIM_SCRIPT.exists():
             messagebox.showerror("Chyba", f"Chybí {SIM_SCRIPT}")
@@ -528,27 +647,54 @@ class TradingGUI(tk.Tk):
     def py(self):
         return os.environ.get("PYTHON", "python")
 
+
+    def _pick_alerts_csv(self):
+        try:
+            p = filedialog.asksaveasfilename(
+                title="Uložit STRONG alerty do CSV",
+                defaultextension=".csv",
+                filetypes=[("CSV", "*.csv"), ("All files", "*.*")]
+            )
+            if p:
+                self.var_alerts_csv.set(p)
+        except Exception as e:
+            messagebox.showerror("Chyba", str(e))
+
     def on_open_live_monitor(self):
-        # spuštění samostatného okna/ procesu
+
         live_py = Path(ROOT) / "src" / "live_monitor.py"
         if not live_py.exists():
             messagebox.showerror("Chyba", f"Soubor {live_py} nebyl nalezen.")
             return
+
         cmd = [
             self.py(), str(live_py),
             "--timeframe", self.var_tf.get(),
-            "--min-conf",  str(self.var_minc.get()),
+            "--min-conf",  str(getattr(self,'var_minc', tk.DoubleVar(value=0.55)).get()),
         ]
-        if self.var_allow_short.get():
+
+        if getattr(self,'var_allow_short', tk.BooleanVar(value=True)).get():
             cmd.append("--allow-short")
-        # volitelně auto fetch každým cyklem (Yahoo; TV se ti v nologin módu hází timeouty)
-        cmd.append("--auto-fetch")
-        # refresh intervalu můžeš přidat takhle (např. 5 s):
-        # cmd += ["--refresh-sec", "5", "--buffer-sec", "10"]
+
+        # Live monitor nastavení
+        if getattr(self, "var_live_auto_fetch", tk.BooleanVar(value=True)).get():
+            cmd.append("--auto-fetch")
+
+        if getattr(self, "var_live_beep_weak", tk.BooleanVar(value=False)).get():
+            cmd.append("--beep-weak")
+
+        if getattr(self, "var_live_no_beep", tk.BooleanVar(value=False)).get():
+            cmd.append("--no-beep")
+
+        if getattr(self, "var_live_no_log", tk.BooleanVar(value=False)).get():
+            cmd.append("--no-log")
+
+        alerts_csv = getattr(self, "var_alerts_csv", tk.StringVar(value="")).get().strip()
+        if alerts_csv:
+            cmd += ["--alerts-csv", alerts_csv]
 
         subprocess.Popen(cmd, cwd=str(ROOT))
         self.log("▶ Spuštěn Live monitor v novém okně. Zavřením okna se alerty vypnou.")
-
 if __name__ == "__main__":
     app = TradingGUI()
     app.mainloop()

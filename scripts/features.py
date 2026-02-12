@@ -81,20 +81,34 @@ def add_indicators(df: pd.DataFrame, wanted: list[str]) -> pd.DataFrame:
         high_max = out["high"].rolling(14).max()
         out["stoch_k"] = 100 * (out["close"] - low_min) / (high_max - low_min + 1e-9)
         out["stoch_d"] = out["stoch_k"].rolling(3).mean()
-
     if "adx" in wanted:
-        plus_dm = (out["high"].diff() > out["low"].diff()).astype(float) * out["high"].diff()
-        minus_dm = (out["low"].diff() > out["high"].diff()).astype(float) * out["low"].diff()
+        # Wilder ADX (14) – stabilní výpočet bez extrémů
+        n = 14
+        high = out["high"]
+        low = out["low"]
+        close = out["close"]
+
+        up_move = high.diff()
+        down_move = -low.diff()
+
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
         tr = pd.concat([
-            out["high"] - out["low"],
-            (out["high"] - out["close"].shift()).abs(),
-            (out["low"] - out["close"].shift()).abs()
+            high - low,
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs()
         ], axis=1).max(axis=1)
-        atr = tr.rolling(14).mean()
-        plus_di = 100 * (plus_dm.rolling(14).sum() / atr)
-        minus_di = 100 * (minus_dm.rolling(14).sum() / atr)
-        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
-        out["adx"] = dx.rolling(14).mean()
+
+        # Wilder smoothing = RMA(alpha=1/n)
+        atr = tr.ewm(alpha=1/n, adjust=False).mean()
+        plus_dm_sm = plus_dm.ewm(alpha=1/n, adjust=False).mean()
+        minus_dm_sm = minus_dm.ewm(alpha=1/n, adjust=False).mean()
+
+        plus_di = 100 * (plus_dm_sm / (atr.replace(0, np.nan)))
+        minus_di = 100 * (minus_dm_sm / (atr.replace(0, np.nan)))
+        dx = 100 * (plus_di - minus_di).abs() / ((plus_di + minus_di).replace(0, np.nan))
+        out["adx"] = dx.ewm(alpha=1/n, adjust=False).mean()
 
     if "mfi" in wanted and "volume" in out.columns:
         tp = (out["high"] + out["low"] + out["close"]) / 3
