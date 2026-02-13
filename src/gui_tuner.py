@@ -549,28 +549,28 @@ class TradingGUI(tk.Tk):
 
 
         # 3) Analýza modelu (vpravo)
-        frame_eval = tk.LabelFrame(tab1, text="Analýza modelu", padx=10, pady=10)
+        frame_eval = tk.LabelFrame(tab1, text="Analyza modelu", padx=10, pady=10)
         frame_eval.grid(row=0, column=2, sticky='nsew', padx=10, pady=10)
         for label, cmd in [
-            ("📈 Scan min_conf",     self.on_scan),
-            ("📄 Otevřít trade-log", self.on_open_trades_file),
-            ("🖼 Otevřít graf",      self.on_open_chart_file),
-            ("🔎 Poslední obchody",  self.on_show_trades),
+            ("Scan min_conf",      self.on_scan),
+            ("Otevrit trade-log",  self.on_open_trades_file),
+            ("Otevrit graf",       self.on_open_chart_file),
+            ("Posledni obchody",   self.on_show_trades),
         ]:
             b = tk.Button(frame_eval, text=label, width=22, command=cmd)
             b.pack(fill='x', pady=6)
             if "Scan" in label:
                 create_tooltip(
                     b,
-                    "Použije stejné predikce/model jako tlačítko Predikovat (stejný timeframe/base).\n"
-                    "Projede rozsah min_conf a najde vhodný kompromis mezi počtem obchodů a PnL."
+                    "Pouzije stejny model/predikce jako tlacitko Predikovat (stejny timeframe/base).\n"
+                    "Projede rozsah min_conf a hleda kompromis mezi poctem obchodu a PnL."
                 )
             elif "trade-log" in label:
-                create_tooltip(b, "Otevře CSV obchodů vytvořené simulací.")
+                create_tooltip(b, "Otevre CSV obchodu vytvorene simulaci.")
             elif "graf" in label:
-                create_tooltip(b, "Otevře poslední PNG equity/simulace.")
-            elif "Poslední" in label:
-                create_tooltip(b, "Zobrazí poslední obchody z aktuálního trade-logu.")
+                create_tooltip(b, "Otevre posledni PNG equity/simulace.")
+            elif "Posledni" in label:
+                create_tooltip(b, "Zobrazi posledni obchody z aktualniho trade-logu.")
 
         # --- scan panel (rozsahy) ---
         row4 = tk.Frame(frame_eval)
@@ -591,9 +591,9 @@ class TradingGUI(tk.Tk):
         ent_p = tk.Entry(row4, textvariable=self.var_scan_step, width=6)
         ent_p.grid(row=0, column=5, padx=5)
 
-        create_tooltip(ent_s, "Počáteční min_conf (např. 0.45).")
-        create_tooltip(ent_t, "Konečná min_conf (např. 0.70).")
-        create_tooltip(ent_p, "Krok min_conf (např. 0.01).")
+        create_tooltip(ent_s, "Pocatecni min_conf (napr. 0.45).")
+        create_tooltip(ent_t, "Konecna min_conf (napr. 0.70).")
+        create_tooltip(ent_p, "Krok min_conf (napr. 0.01).")
 
         # Sdílené parametry backtestu (Scan + Simulace)
         row5 = tk.Frame(frame_eval)
@@ -603,7 +603,7 @@ class TradingGUI(tk.Tk):
         tk.Label(row5, text="fee %").grid(row=0, column=2, sticky="e")
         tk.Entry(row5, textvariable=self.var_fee, width=6).grid(row=0, column=3, padx=5)
         tk.Checkbutton(row5, text="allow_short", variable=self.var_allow_short).grid(row=0, column=4, padx=(8, 0), sticky="w")
-        create_tooltip(row5, "Sdílené parametry pro Scan i Simulaci. Hodnoty se propisují i do záložky Simulace a Live režim.")
+        create_tooltip(row5, "Sdilene parametry pro Scan i Simulaci. Hodnoty se propisuji i do zalozky Simulace a Live rezim.")
        
 
         # LOG – přes celou šířku
@@ -642,7 +642,7 @@ class TradingGUI(tk.Tk):
 
         # -------------------- ZÁLOŽKA 2: SIMULACE A LIVE REŽIM -----------------
         tab2 = ttk.Frame(notebook)
-        notebook.add(tab2, text='Simulace a Live režim')
+        notebook.add(tab2, text='Simulace a Live rezim')
 
         tab2.grid_columnconfigure(0, weight=1)
         tab2.grid_rowconfigure(0, weight=1)
@@ -653,15 +653,15 @@ class TradingGUI(tk.Tk):
         # Tlačítka – vlevo nahoře
         row_btns = tk.Frame(live_frame)
         row_btns.pack(fill='x')
-        tk.Button(row_btns, text="📊 Spustit simulaci",  width=20, command=self.on_simulate).pack(side='left')
-        tk.Button(row_btns, text="📡 Spustit Live režim", width=20, command=self.on_open_live_monitor).pack(side='left', padx=8)
+        tk.Button(row_btns, text="Spustit simulaci",  width=20, command=self.on_simulate).pack(side='left')
+        tk.Button(row_btns, text="Spustit Live rezim", width=20, command=self.on_open_live_monitor).pack(side='left', padx=8)
         tk.Button(row_btns, text="Stop Live rezim", width=18, command=self.on_stop_live_monitor).pack(side='left', padx=4)
         self.var_live_status = tk.StringVar(value="Live: zastaveno")
         tk.Label(row_btns, textvariable=self.var_live_status, fg="#2c3e50").pack(side='right')
 
 
         # Nastavení Live monitoru (graf + pípání + CSV log STRONG alertů)
-        lm_box = tk.LabelFrame(live_frame, text="Nastavení Live monitoru", padx=10, pady=6)
+        lm_box = tk.LabelFrame(live_frame, text="Nastaveni Live monitoru", padx=10, pady=6)
         lm_box.pack(fill='x', pady=(10, 6))
 
         lm_row1 = tk.Frame(lm_box); lm_row1.pack(fill='x', pady=(2, 2))
@@ -673,14 +673,14 @@ class TradingGUI(tk.Tk):
         tk.Checkbutton(lm_row1, text="Vypnout pípání", variable=self.var_live_no_beep).pack(side='left', padx=10)
         self.var_live_no_log = tk.BooleanVar(value=False)
         tk.Checkbutton(lm_row1, text="Vypnout CSV log", variable=self.var_live_no_log).pack(side='left', padx=10)
-        create_tooltip(lm_row1, "Výchozí: pípá jen STRONG signály a zapisuje STRONG alerty do CSV.")
+        create_tooltip(lm_row1, "Vychozi: pipa jen STRONG signaly a zapisuje STRONG alerty do CSV.")
 
         lm_row2 = tk.Frame(lm_box); lm_row2.pack(fill='x', pady=(2, 2))
         tk.Label(lm_row2, text="CSV pro STRONG alerty:").pack(side='left')
         self.var_alerts_csv = tk.StringVar(value="")
         tk.Entry(lm_row2, textvariable=self.var_alerts_csv, width=60).pack(side='left', padx=(6, 6))
         tk.Button(lm_row2, text="…", width=3, command=self._pick_alerts_csv).pack(side='left')
-        create_tooltip(lm_row2, "Nech prázdné = default results/live_alerts_<tf>.csv")
+        create_tooltip(lm_row2, "Nech prazdne = default results/live_alerts_<tf>.csv")
 
         # Riziko na obchod – řídí trade_pct pro simulaci i live
         rk = tk.Frame(live_frame)
@@ -689,7 +689,7 @@ class TradingGUI(tk.Tk):
         self.var_risk_pct = tk.DoubleVar(value=5.0)
         ent_risk = tk.Entry(rk, textvariable=self.var_risk_pct, width=8)
         ent_risk.pack(side='left', padx=6)
-        create_tooltip(ent_risk, "Použije se jako trade_pct.\nPříklad: 5.0 = 5 % kapitálu na STRONG vstup.")
+        create_tooltip(ent_risk, "Pouzije se jako trade_pct. Priklad: 5.0 = 5 % kapitalu na STRONG vstup.")
 
         # === NOVÉ: ladicí parametry simulace ===
         tk.Label(live_frame, text="Pokročilé parametry simulace:").pack(anchor='w', pady=(8,2))
@@ -717,12 +717,12 @@ class TradingGUI(tk.Tk):
         ent_maxh = tk.Entry(adv, textvariable=self.var_max_hold, width=6)
         ent_maxh.pack(side='left', padx=(4,12))
 
-        create_tooltip(adv, "Ladicí simulace:\n- min_conf_low: práh pro slabší signál\n- trade_pct_low: automaticky z rizika (40 % STRONG)\n- max_hold: časový limit držení (v barech).\nNastav -1 / 0 pro deaktivaci.")
-        create_tooltip(ent_minc, "Výchozí: 0.55. Doporučený rozsah cca 0.45–0.60.")
-        create_tooltip(ent_fee, "Výchozí: 0.30 (%). Simulace i scan používají fee_pct = fee/100.")
-        create_tooltip(cb_allow, "Povolí short obchody v simulaci a scanu.")
-        create_tooltip(ent_mclo, "Výchozí: 0.45. Musí být menší než min_conf.")
-        create_tooltip(ent_maxh, "Výchozí: 0 (vypnuto). Např. 24 nebo 48 pro časový stop.")
+        create_tooltip(adv, "Ladici simulace: min_conf_low je prah pro slabsi signal, trade_pct_low se odvodi z rizika (40 % STRONG), max_hold je casovy limit drzeni (v barech). Nastav -1/0 pro deaktivaci.")
+        create_tooltip(ent_minc, "Vychozi: 0.55. Doporuceny rozsah cca 0.45-0.60.")
+        create_tooltip(ent_fee, "Vychozi: 0.30 (%). Simulace i scan pouzivaji fee_pct = fee/100.")
+        create_tooltip(cb_allow, "Povoli short obchody v simulaci a scanu.")
+        create_tooltip(ent_mclo, "Vychozi: 0.45. Musi byt mensi nez min_conf.")
+        create_tooltip(ent_maxh, "Vychozi: 0 (vypnuto). Napr. 24 nebo 48 pro casovy stop.")
         self.var_risk_pct.trace_add("write", self._on_risk_changed)
         self._refresh_risk_derived_labels()
 
