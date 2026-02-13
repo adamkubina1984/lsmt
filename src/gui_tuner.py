@@ -207,6 +207,7 @@ class TradingGUI(tk.Tk):
 
         # Live alerts (spouštíme jako samostatný proces)
         self._live_proc = None
+        self._help_win = None
         self._build_ui()
 
     def _load_two_stage_thresholds_from_meta(self):
@@ -254,6 +255,13 @@ class TradingGUI(tk.Tk):
             self.log(f"[CHYBA] Uložení two-stage parametrů selhalo: {e}")
 
     def _build_ui(self):
+        # Sdílené proměnné mezi záložkami (propisují se automaticky)
+        self.var_minc = tk.DoubleVar(value=0.55)
+        self.var_mclo = tk.DoubleVar(value=0.45)
+        self.var_max_hold = tk.IntVar(value=0)
+        self.var_allow_short = tk.BooleanVar(value=True)
+        self.var_fee = tk.DoubleVar(value=0.30)
+
         notebook = ttk.Notebook(self)
         notebook.pack(fill='both', expand=True)
 
@@ -261,15 +269,19 @@ class TradingGUI(tk.Tk):
         tab1 = ttk.Frame(notebook)
         notebook.add(tab1, text='Příprava a analýza')
 
-        # Grid layout – 3 sloupce nahoře + log přes celou šířku dole
+        # Grid layout – 3 sloupce nahoře + pomocné panely + log dole
         tab1.grid_columnconfigure(0, weight=1, uniform="col")
         tab1.grid_columnconfigure(1, weight=2, uniform="col")
         tab1.grid_columnconfigure(2, weight=1, uniform="col")
         tab1.grid_rowconfigure(0, weight=1)
 
-        # 1) Sběr dat (vlevo)
-        frame_data = tk.LabelFrame(tab1, text="Sběr dat", padx=10, pady=10)
-        frame_data.grid(row=0, column=0, sticky='nsew', padx=10, pady=10)
+        # 1) Levý sloupec: samostatné framy Sběr dat + Automatický výběr
+        frame_left = tk.Frame(tab1)
+        frame_left.grid(row=0, column=0, sticky='nsew', padx=10, pady=10)
+        frame_left.grid_columnconfigure(0, weight=1)
+
+        frame_data = tk.LabelFrame(frame_left, text="Sběr dat", padx=10, pady=10)
+        frame_data.grid(row=0, column=0, sticky='nsew')
         btn_tv = tk.Button(frame_data, text="📥 Stáhnout data (GOLD + VIX)", width=26, command=self.on_fetch)
         btn_tv.pack(fill='x', pady=6)
         create_tooltip(btn_tv, "Stáhne/aktualizuje GOLD a VIX. DXY/COT jsou výchozí režim OFF.")
@@ -319,6 +331,9 @@ class TradingGUI(tk.Tk):
         cb_tf = ttk.Combobox(tf_row, textvariable=self.var_tf, values=["5m", "1h"], state='readonly', width=8)
         cb_tf.pack(side='left', padx=6)
         create_tooltip(cb_tf, "Časový rámec dat a modelu.\n5m = intradenní, 1h = hodinový.")
+        btn_help = tk.Button(tf_row, text="❓ Nápověda", command=self.on_open_help_window)
+        btn_help.pack(side='right')
+        create_tooltip(btn_help, "Otevře podrobnou nápovědu ke všem sekcím GUI.")
 
         self.var_feat_source = tk.StringVar(value="manual")
         mode_row = tk.Frame(frame_train)
@@ -339,7 +354,12 @@ class TradingGUI(tk.Tk):
         tk.Label(row1, text="seq_len").pack(side='left')
         self.var_seq = tk.IntVar(value=30)
         e_seq = tk.Entry(row1, textvariable=self.var_seq, width=6); e_seq.pack(side='left', padx=(4, 12))
-        create_tooltip(e_seq, "Délka sekvence (počet posledních svíček pro LSTM).")
+        create_tooltip(
+            e_seq,
+            "Počet posledních svíček, které model vidí najednou.\n"
+            "Prakticky: 5m TF obvykle 20–80 (start 30), 1h TF obvykle 12–48.\n"
+            "Vyšší hodnota = víc kontextu, ale pomalejší trénink a větší riziko přeučení."
+        )
 
         tk.Label(row1, text="thr_pct %").pack(side='left')
         self.var_thr = tk.DoubleVar(value=0.30)
@@ -349,12 +369,17 @@ class TradingGUI(tk.Tk):
         tk.Label(row1, text="epochs").pack(side='left')
         self.var_epochs = tk.IntVar(value=20)
         e_ep = tk.Entry(row1, textvariable=self.var_epochs, width=6); e_ep.pack(side='left', padx=(4, 12))
-        create_tooltip(e_ep, "Počet epoch. Sleduj val_loss – když nepadají, nemá smysl přidávat.")
+        create_tooltip(e_ep, "Počet epoch. Doporučený start 15–40. Když val_loss stagnuje, další epochy už nepomáhají.")
 
         tk.Label(row1, text="batch").pack(side='left')
         self.var_batch = tk.IntVar(value=32)
         e_ba = tk.Entry(row1, textvariable=self.var_batch, width=6); e_ba.pack(side='left', padx=(4, 12))
-        create_tooltip(e_ba, "Velikost batch. Obvykle 32–128 (podle RAM/CPU).")
+        create_tooltip(
+            e_ba,
+            "Počet vzorků na jeden update gradientu.\n"
+            "Doporučený rozsah 16–128 (start 32).\n"
+            "Menší batch = pomalejší, ale někdy stabilnější; větší batch = rychlejší, ale může zhoršit generalizaci."
+        )
 
         # COT je v default pipeline vypnutý; cot_shift proto v GUI schován.
 
@@ -384,11 +409,22 @@ class TradingGUI(tk.Tk):
         rb_m.pack(side='left', padx=8)
         rb_ts = tk.Radiobutton(tm_row, text="Two-stage (Trade + Direction)", variable=self.var_train_mode, value="two_stage")
         rb_ts.pack(side='left', padx=8)
-        create_tooltip(tm_row, "Multi = jeden model (BUY/SELL/NO-TRADE)\\nTwo-stage = 2 modely: Trade/NoTrade → Buy/Sell (stabilnější)")
+        create_tooltip(
+            tm_row,
+            "Multi: jeden 3-class model (BUY/SELL/NO-TRADE).\n"
+            "Two-stage: 2 modely (Trade/NoTrade -> Buy/Sell), obvykle stabilnější v live."
+        )
 
         # Tlačítko tréninku
         btns_train = tk.Frame(train_box); btns_train.pack(fill='x', pady=(6, 2))
-        tk.Button(btns_train, text="🧠 Trénovat model", width=20, command=self.on_train).pack(anchor='w', pady=2)
+        btn_train = tk.Button(btns_train, text="🧠 Trénovat model", width=20, command=self.on_train)
+        btn_train.pack(anchor='w', pady=2)
+        create_tooltip(
+            btn_train,
+            "Spustí trénink pro aktuální timeframe.\n"
+            "Výstup: model + scaler + metadata v models/.\n"
+            "Live režim používá modely z těchto metadat."
+        )
 
         # ────────────────────────────────────────────────────────────
         # B) PREDIKCE – pouze prvky, které ovlivňují predict_lstm_tradingview.py
@@ -401,25 +437,29 @@ class TradingGUI(tk.Tk):
         tk.Checkbutton(ts_row, text="Použít Two-stage inference", variable=self.var_use_two_stage).pack(side='left', padx=(0,12))
         self.var_force_single = tk.BooleanVar(value=False)
         tk.Checkbutton(ts_row, text="Vynutit Single-stage", variable=self.var_force_single).pack(side='left', padx=12)
-        create_tooltip(ts_row, "Two-stage je doporučený.\nVynutit Single-stage použij, když chceš dočasně ignorovat meta.two_stage.enabled.")
-        create_tooltip(ts_row, "Dvoustupňová inference: 1) Trade/No-Trade  2) BUY/SELL.\nPři zapnutí se prahy čtou z meta.")
+        create_tooltip(
+            ts_row,
+            "Použít Two-stage inference: vynutí dvoustupňovou predikci.\n"
+            "Vynutit Single-stage: dočasně ignoruje metadata a jede 3-class model.\n"
+            "Bez obou voleb běží AUTO podle metadata.two_stage.enabled."
+        )
 
         # Práhy (GUI ↔ meta)
         thr_row = tk.Frame(pred_box); thr_row.pack(fill='x', pady=(2, 2))
         tk.Label(thr_row, text="min_conf_trade").pack(side='left')
         self.var_ts_mct = tk.DoubleVar(value=0.48)
         tk.Entry(thr_row, textvariable=self.var_ts_mct, width=6).pack(side='left', padx=(4, 12))
-        create_tooltip(thr_row, "Krok 1: práh pro Trade/No-Trade (sigmoid).")
+        create_tooltip(thr_row, "Krok 1 (Trade/No-Trade): obvykle 0.45–0.60. Vyšší = méně obchodů.")
 
         tk.Label(thr_row, text="min_conf_dir").pack(side='left')
         self.var_ts_mcd = tk.DoubleVar(value=0.55)
         tk.Entry(thr_row, textvariable=self.var_ts_mcd, width=6).pack(side='left', padx=(4, 12))
-        create_tooltip(thr_row, "Krok 2: max(p_buy, p_sell) ≥ min_conf_dir.")
+        create_tooltip(thr_row, "Krok 2 (směr): max(p_buy, p_sell) >= min_conf_dir. Obvykle 0.50–0.65.")
 
         tk.Label(thr_row, text="min_margin_dir").pack(side='left')
         self.var_ts_mmd = tk.DoubleVar(value=0.05)
         tk.Entry(thr_row, textvariable=self.var_ts_mmd, width=6).pack(side='left', padx=(4, 12))
-        create_tooltip(thr_row, "Krok 2: |p_buy − p_sell| ≥ min_margin_dir (potlačí „šedé“ signály).")
+        create_tooltip(thr_row, "Krok 2 (jistota směru): |p_buy - p_sell| >= min_margin_dir. Obvykle 0.03–0.12.")
 
         # Načíst/Uložit do meta (two-stage část)
         io_row = tk.Frame(pred_box); io_row.pack(fill='x', pady=(2, 4))
@@ -430,23 +470,50 @@ class TradingGUI(tk.Tk):
         # Globální min_conf filtr (predikce) – nezávislý na two-stage
         mc_row = tk.Frame(pred_box); mc_row.pack(fill='x', pady=(2, 6))
         tk.Label(mc_row, text="min_conf (globální filtr)").pack(side='left')
-        self.var_minc = tk.DoubleVar(value=0.55)
         tk.Entry(mc_row, textvariable=self.var_minc, width=6).pack(side='left', padx=(4, 12))
-        create_tooltip(mc_row, "Globální filtr na signal_strength\n(pod prahem se signál přepíše na No-Trade).")
+        create_tooltip(
+            mc_row,
+            "Globální filtr výsledné síly signálu.\n"
+            "Prakticky: 0.45–0.60. Vyšší hodnota výrazně sníží počet obchodů."
+        )
+
+        # Sdílené pokročilé parametry (propisují se do záložky Simulace a Live režim)
+        adv_pred = tk.Frame(pred_box); adv_pred.pack(fill='x', pady=(0, 6))
+        tk.Label(adv_pred, text="min_conf_low").pack(side='left')
+        tk.Entry(adv_pred, textvariable=self.var_mclo, width=6).pack(side='left', padx=(4, 12))
+        tk.Label(adv_pred, text="trade_pct_low").pack(side='left')
+        self.var_trade_pct_low_info = tk.StringVar(value="auto")
+        tk.Label(adv_pred, textvariable=self.var_trade_pct_low_info, width=14, anchor='w').pack(side='left', padx=(4, 12))
+        tk.Label(adv_pred, text="max_hold").pack(side='left')
+        tk.Entry(adv_pred, textvariable=self.var_max_hold, width=6).pack(side='left', padx=(4, 12))
+        create_tooltip(
+            adv_pred,
+            "Pokročilé parametry simulace/live (sdílené mezi záložkami).\n"
+            "Výchozí start:\n"
+            "min_conf=0.55, min_conf_low=0.45, max_hold=0 (vypnuto).\n"
+            "trade_pct_low se počítá automaticky z Riziko na obchod (%).\n"
+            "Pravidlo: min_conf_low musí být menší než min_conf."
+        )
 
         # Tlačítko predikce
         btns_pred = tk.Frame(pred_box); btns_pred.pack(fill='x', pady=(2, 0))
-        tk.Button(btns_pred, text="🔮 Predikovat", width=20, command=self.on_predict).pack(anchor='w', pady=2)
+        btn_predict = tk.Button(btns_pred, text="🔮 Predikovat", width=20, command=self.on_predict)
+        btn_predict.pack(anchor='w', pady=2)
+        create_tooltip(
+            btn_predict,
+            "Vytvoří predictions_<base>_<TF>.csv podle aktuálního nastavení režimu (auto/two/single).\n"
+            "Stejný predikční skript používá i Live monitor."
+        )
 
         # Po sestavení UI zamkni checkboxy v AUTO módu
         self.update_feature_checkboxes()
 
 
-        # --- Automatický výběr indikátorů (evoluční)
-        auto_box = tk.LabelFrame(frame_train, text="Automatický výběr indikátorů (evoluce)")
-        auto_box.pack(fill='x', padx=0, pady=(10, 8))
+        # --- Automatický výběr indikátorů (evoluční) - samostatný frame v levém sloupci
+        frame_auto = tk.LabelFrame(frame_left, text="Automatický výběr indikátorů (evoluce)", padx=10, pady=8)
+        frame_auto.grid(row=1, column=0, sticky='ew', pady=(10, 0))
 
-        row_auto = tk.Frame(auto_box)
+        row_auto = tk.Frame(frame_auto)
         row_auto.pack(fill='x', pady=4)
 
         # layout do jedné řádky (grid), tlačítko před "Min obchodů/den:"
@@ -471,12 +538,14 @@ class TradingGUI(tk.Tk):
         tk.Entry(row_auto, textvariable=self.evo_min_trades, width=5).grid(row=0, column=5, padx=(4, 12), sticky="w")
 
         btn_evo = tk.Button(row_auto, text="🎯  Spustit výběr", command=self.on_find_best_indicators)
-        btn_evo.grid(row=0, column=6, padx=(6, 12), sticky="w")
+        btn_evo.grid(row=1, column=0, columnspan=7, padx=(0, 0), pady=(8, 0), sticky="w")
 
-        create_tooltip(auto_box,
-            "Spustí skript select_best_indicators.py se zadanými parametry a timeframe.\n"
-            "Výsledek (nejlepší sada) se uloží do models/features_tv_<TF>.json jako 'features_auto'."
-            "Po doběhu přepni 'Výběr indikátorů' na Automatický a trénuj/predikuj.")
+        create_tooltip(
+            frame_auto,
+            "Spustí evoluční výběr indikátorů pro zvolený timeframe.\n"
+            "Výsledek se uloží do models/features_tv_<TF>.json jako features_auto.\n"
+            "Pak přepni v Tréninku volbu na 'Automatický' a spusť trénink/predikci."
+        )
 
 
         # 3) Analýza modelu (vpravo)
@@ -488,7 +557,20 @@ class TradingGUI(tk.Tk):
             ("🖼 Otevřít graf",      self.on_open_chart_file),
             ("🔎 Poslední obchody",  self.on_show_trades),
         ]:
-            tk.Button(frame_eval, text=label, width=22, command=cmd).pack(fill='x', pady=6)
+            b = tk.Button(frame_eval, text=label, width=22, command=cmd)
+            b.pack(fill='x', pady=6)
+            if "Scan" in label:
+                create_tooltip(
+                    b,
+                    "Použije stejné predikce/model jako tlačítko Predikovat (stejný timeframe/base).\n"
+                    "Projede rozsah min_conf a najde vhodný kompromis mezi počtem obchodů a PnL."
+                )
+            elif "trade-log" in label:
+                create_tooltip(b, "Otevře CSV obchodů vytvořené simulací.")
+            elif "graf" in label:
+                create_tooltip(b, "Otevře poslední PNG equity/simulace.")
+            elif "Poslední" in label:
+                create_tooltip(b, "Zobrazí poslední obchody z aktuálního trade-logu.")
 
         # --- scan panel (rozsahy) ---
         row4 = tk.Frame(frame_eval)
@@ -512,6 +594,16 @@ class TradingGUI(tk.Tk):
         create_tooltip(ent_s, "Počáteční min_conf (např. 0.45).")
         create_tooltip(ent_t, "Konečná min_conf (např. 0.70).")
         create_tooltip(ent_p, "Krok min_conf (např. 0.01).")
+
+        # Sdílené parametry backtestu (Scan + Simulace)
+        row5 = tk.Frame(frame_eval)
+        row5.pack(fill='x', pady=(8, 0))
+        tk.Label(row5, text="min_conf").grid(row=0, column=0, sticky="e")
+        tk.Entry(row5, textvariable=self.var_minc, width=6).grid(row=0, column=1, padx=5)
+        tk.Label(row5, text="fee %").grid(row=0, column=2, sticky="e")
+        tk.Entry(row5, textvariable=self.var_fee, width=6).grid(row=0, column=3, padx=5)
+        tk.Checkbutton(row5, text="allow_short", variable=self.var_allow_short).grid(row=0, column=4, padx=(8, 0), sticky="w")
+        create_tooltip(row5, "Sdílené parametry pro Scan i Simulaci. Hodnoty se propisují i do záložky Simulace a Live režim.")
        
 
         # LOG – přes celou šířku
@@ -587,34 +679,49 @@ class TradingGUI(tk.Tk):
         tk.Button(lm_row2, text="…", width=3, command=self._pick_alerts_csv).pack(side='left')
         create_tooltip(lm_row2, "Nech prázdné = default results/live_alerts_<tf>.csv")
 
-        # Riziko na obchod – vizuální, logiku neměníme
+        # Riziko na obchod – řídí trade_pct pro simulaci i live
         rk = tk.Frame(live_frame)
         rk.pack(fill='x', pady=(12,4))
         tk.Label(rk, text="Riziko na obchod (%):").pack(side='left')
         self.var_risk_pct = tk.DoubleVar(value=5.0)
-        tk.Entry(rk, textvariable=self.var_risk_pct, width=8).pack(side='left', padx=6)
+        ent_risk = tk.Entry(rk, textvariable=self.var_risk_pct, width=8)
+        ent_risk.pack(side='left', padx=6)
+        create_tooltip(ent_risk, "Použije se jako trade_pct.\nPříklad: 5.0 = 5 % kapitálu na STRONG vstup.")
 
         # === NOVÉ: ladicí parametry simulace ===
         tk.Label(live_frame, text="Pokročilé parametry simulace:").pack(anchor='w', pady=(8,2))
         adv = tk.Frame(live_frame)
         adv.pack(fill='x', pady=(0,6))
 
+        tk.Label(adv, text="min_conf").pack(side='left')
+        ent_minc = tk.Entry(adv, textvariable=self.var_minc, width=6)
+        ent_minc.pack(side='left', padx=(4,12))
+
+        tk.Label(adv, text="fee %").pack(side='left')
+        ent_fee = tk.Entry(adv, textvariable=self.var_fee, width=6)
+        ent_fee.pack(side='left', padx=(4,12))
+        cb_allow = tk.Checkbutton(adv, text="allow_short", variable=self.var_allow_short)
+        cb_allow.pack(side='left', padx=(4,12))
+
         tk.Label(adv, text="min_conf_low").pack(side='left')
-        self.var_mclo = tk.DoubleVar(value=-1)
         ent_mclo = tk.Entry(adv, textvariable=self.var_mclo, width=6)
         ent_mclo.pack(side='left', padx=(4,12))
 
         tk.Label(adv, text="trade_pct_low").pack(side='left')
-        self.var_tplo = tk.DoubleVar(value=0.0)
-        ent_tplo = tk.Entry(adv, textvariable=self.var_tplo, width=6)
-        ent_tplo.pack(side='left', padx=(4,12))
+        tk.Label(adv, textvariable=self.var_trade_pct_low_info, width=14, anchor='w').pack(side='left', padx=(4,12))
 
         tk.Label(adv, text="max_hold").pack(side='left')
-        self.var_max_hold = tk.IntVar(value=0)
         ent_maxh = tk.Entry(adv, textvariable=self.var_max_hold, width=6)
         ent_maxh.pack(side='left', padx=(4,12))
 
-        create_tooltip(adv, "Ladicí simulace:\n- min_conf_low: práh pro slabší signál\n- trade_pct_low: velikost slabší pozice\n- max_hold: časový limit držení (v barech).\nNastav -1 / 0 pro deaktivaci.")
+        create_tooltip(adv, "Ladicí simulace:\n- min_conf_low: práh pro slabší signál\n- trade_pct_low: automaticky z rizika (40 % STRONG)\n- max_hold: časový limit držení (v barech).\nNastav -1 / 0 pro deaktivaci.")
+        create_tooltip(ent_minc, "Výchozí: 0.55. Doporučený rozsah cca 0.45–0.60.")
+        create_tooltip(ent_fee, "Výchozí: 0.30 (%). Simulace i scan používají fee_pct = fee/100.")
+        create_tooltip(cb_allow, "Povolí short obchody v simulaci a scanu.")
+        create_tooltip(ent_mclo, "Výchozí: 0.45. Musí být menší než min_conf.")
+        create_tooltip(ent_maxh, "Výchozí: 0 (vypnuto). Např. 24 nebo 48 pro časový stop.")
+        self.var_risk_pct.trace_add("write", self._on_risk_changed)
+        self._refresh_risk_derived_labels()
 
         # Výstup Live predikcí – textové okno
         tk.Label(live_frame, text="Výstup predikcí (Live):").pack(anchor='w', pady=(10,2))
@@ -653,6 +760,7 @@ class TradingGUI(tk.Tk):
     def log_current_auto_features(self):
         """Vypíše do logu aktuální auto výběr z models/features_tv_<tf>.json."""
         tf = self.var_tf.get()
+        base = getattr(self, 'var_base', tk.StringVar(value='gold')).get().strip().lower() or "gold"
         meta_path = ROOT / "models" / f"features_tv_{tf}.json"
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
@@ -762,6 +870,29 @@ class TradingGUI(tk.Tk):
         # necháme jako sync API; uvnitř používejme jednotně _append_log
         self._append_log(msg)
 
+    def _append_live_output(self, msg: str):
+        if not hasattr(self, "live_output"):
+            return
+        if msg is None:
+            return
+        if isinstance(msg, bytes):
+            try:
+                msg = msg.decode("utf-8", "ignore")
+            except Exception:
+                msg = str(msg)
+        orig_state = self.live_output.cget("state")
+        if orig_state == "disabled":
+            self.live_output.configure(state="normal")
+        if not msg.endswith("\n"):
+            msg = msg + "\n"
+        self.live_output.insert("end", msg)
+        self.live_output.see("end")
+        if orig_state == "disabled":
+            self.live_output.configure(state="disabled")
+
+    def log_live_async(self, msg: str):
+        self.after(0, self._append_live_output, msg)
+
     # ------------------- helpery pro log ----------------------
     def _clear_log(self):
         self.txt.delete('1.0', tk.END)
@@ -775,6 +906,116 @@ class TradingGUI(tk.Tk):
                 f.write(self.txt.get('1.0', tk.END))
         except Exception as e:
             messagebox.showerror('Chyba při ukládání logu', str(e))
+
+    def _build_help_text(self) -> str:
+        return (
+            "LSTM GUI Tuner - Napoveda\n"
+            "=========================\n\n"
+            "1) Sber dat\n"
+            "- Fetch mode:\n"
+            "  append = doplnuje nove svicky,\n"
+            "  overwrite = prepise soubor poslednimi N bary.\n"
+            "- bars: kolik poslednich baru stahnout (typicky 1000-5000).\n"
+            "- DXY/COT: volitelna makro data, zapinej jen pokud je opravdu pouzivas.\n\n"
+            "2) Automaticky vyber indikatoru (evoluce)\n"
+            "- Generace/Populace urcuji delku a sirku hledani.\n"
+            "- Min obchodu/den brani tomu, aby vyhrala strategie s malym poctem obchodu.\n"
+            "- Vysledek se uklada do models/features_tv_<TF>.json jako features_auto.\n\n"
+            "3) Trenink modelu\n"
+            "- seq_len: kolik svicek model vidi najednou.\n"
+            "  5m: obvykle 20-80 (start 30), 1h: obvykle 12-48.\n"
+            "- thr_pct: jak citlive se tvori BUY/SELL/NO-TRADE labely.\n"
+            "- epochs: obvykle 15-40; vyssi dava smysl jen pokud val_loss stale klesa.\n"
+            "- batch: obvykle 16-128 (start 32).\n"
+            "- Rezim treninku:\n"
+            "  Multi = 1 model (BUY/SELL/NO-TRADE),\n"
+            "  Two-stage = 2 modely (Trade/NoTrade -> Buy/Sell).\n\n"
+            "4) Predikce\n"
+            "- AUTO: rezim se vezme z metadata.two_stage.enabled.\n"
+            "- Pouzit Two-stage inference: vynuti two-stage.\n"
+            "- Vynutit Single-stage: docasne ignoruje two-stage metadata.\n"
+            "- min_conf_trade/min_conf_dir/min_margin_dir: prahy two-stage.\n"
+            "  Prakticky:\n"
+            "  min_conf_trade 0.45-0.60,\n"
+            "  min_conf_dir   0.50-0.65,\n"
+            "  min_margin_dir 0.03-0.12.\n"
+            "- min_conf (globalni): obvykle 0.45-0.60 (vychozi 0.55).\n\n"
+            "5) Analyza modelu\n"
+            "- Scan min_conf prochazi rozsah hodnot a ukaze nejlepsi kompromis.\n"
+            "- Trade-log/graf/posledni obchody ctou vysledky posledni simulace.\n"
+            "- Analyza pouziva stejna predikcni data jako Predikce (a tim i stejny model/rezim).\n\n"
+            "6) Simulace a Live rezim\n"
+            "- Simulace testuje pravidla na CSV predikcich a vytvori equity/trade log.\n"
+            "- Live monitor pouziva stejny predikcni skript a metadata.\n"
+            "- Pokud se nedari zapis CSV, zkontroluj, ze soubor neni otevreny v Excelu.\n\n"
+            "Kompletni sada parametru (sdilena mezi zalozkami)\n"
+            "- min_conf:\n"
+            "  Globalni filtr sily signalu (0-1). Vyssi hodnota = mene obchodu.\n"
+            "  Pouziva Predikce, Scan min_conf i Simulace.\n"
+            "  Doporuceni: 0.45-0.60 (vychozi 0.55).\n"
+            "- fee %:\n"
+            "  Poplatek za obchod v procentech (0.30 = 0.3 %).\n"
+            "  Pouziva Scan i Simulace (neovlivnuje vypocet samotne predikce).\n"
+            "- allow_short:\n"
+            "  Povoli short obchody. Kdyz je vypnuto, bere se jen long.\n"
+            "  Pouziva Scan i Simulace.\n"
+            "- min_conf_low:\n"
+            "  Druhy (nizsi) prah pro slabsi vstupy. Musi byt mensi nez min_conf.\n"
+            "  Pouziva Simulace (a Live monitor, pokud je parametr predan).\n"
+            "- trade_pct_low:\n"
+            "  Velikost slabsi pozice jako cast kapitalu.\n"
+            "  POCITA se automaticky z rizika: trade_pct_low = 0.40 * trade_pct.\n"
+            "  Pouziva Simulace (a Live monitor, pokud je parametr predan).\n"
+            "- max_hold:\n"
+            "  Time-stop v poctu baru. 0 = vypnuto.\n"
+            "  Priklad: 24 na TF 5m je cca 2 hodiny drzeni.\n"
+            "  Pouziva Simulace (a Live monitor, pokud je parametr predan).\n\n"
+            "Poznamka k predikci vs simulaci\n"
+            "- Predikce vytvari signaly (a jejich confidence).\n"
+            "- Simulace teprve rozhodne, ktere signaly obchodovat podle min_conf,\n"
+            "  allow_short, fee a pokrocilych parametru.\n"
+            "- Proto je normalni, ze pri stejne predikci mohou ruzna nastaveni\n"
+            "  simulace dat odlisny pocet obchodu a odlisne PnL.\n\n"
+            "Vychozi pokrocile parametry\n"
+            "- min_conf = 0.55\n"
+            "- min_conf_low = 0.45\n"
+            "- riziko na obchod = 5 % (trade_pct=0.05)\n"
+            "- trade_pct_low(auto) = 2 %\n"
+            "- max_hold = 0 (vypnuto)\n\n"
+            "Doporuceny postup prace\n"
+            "1. Fetch dat\n"
+            "2. (Volitelne) Evoluce indikatoru\n"
+            "3. Trenink\n"
+            "4. Predikce\n"
+            "5. Scan min_conf\n"
+            "6. Simulace\n"
+            "7. Live monitor\n"
+        )
+
+    def on_open_help_window(self):
+        if self._help_win is not None and self._help_win.winfo_exists():
+            self._help_win.lift()
+            self._help_win.focus_force()
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Nápověda")
+        win.geometry("920x700")
+        self._help_win = win
+
+        wrapper = tk.Frame(win)
+        wrapper.pack(fill='both', expand=True, padx=10, pady=10)
+        wrapper.grid_rowconfigure(0, weight=1)
+        wrapper.grid_columnconfigure(0, weight=1)
+
+        txt = tk.Text(wrapper, wrap='word')
+        txt.grid(row=0, column=0, sticky='nsew')
+        ysb = ttk.Scrollbar(wrapper, orient='vertical', command=txt.yview)
+        ysb.grid(row=0, column=1, sticky='ns')
+        txt.configure(yscrollcommand=ysb.set)
+
+        txt.insert('1.0', self._build_help_text())
+        txt.configure(state='disabled')
 
     # ------------------- actions (zachováno beze změn) ----------------------
     def on_fetch(self):
@@ -903,36 +1144,114 @@ class TradingGUI(tk.Tk):
         # else: auto (predict si rozhodne podle meta)
 
         run_cmd(cmd, self.log_async, ROOT)
+
+    def _safe_risk_pct(self) -> float:
+        try:
+            v = float(getattr(self, "var_risk_pct", tk.DoubleVar(value=5.0)).get())
+        except Exception:
+            v = 5.0
+        if v < 0:
+            v = 0.0
+        if v > 100:
+            v = 100.0
+        return v
+
+    def _trade_pct_strong(self) -> float:
+        return self._safe_risk_pct() / 100.0
+
+    def _trade_pct_low(self) -> float:
+        # Slabý vstup = 40 % STRONG vstupu.
+        return self._trade_pct_strong() * 0.40
+
+    def _refresh_risk_derived_labels(self):
+        low = self._trade_pct_low()
+        if hasattr(self, "var_trade_pct_low_info"):
+            self.var_trade_pct_low_info.set(f"{low:.4f} ({low*100:.2f}%)")
+
+    def _on_risk_changed(self, *_):
+        self._refresh_risk_derived_labels()
+
     def on_simulate(self):
         if not SIM_SCRIPT.exists():
             messagebox.showerror("Chyba", f"Chybí {SIM_SCRIPT}")
             return
         base = getattr(self, 'var_base', tk.StringVar(value='gold')).get()
         pred_csv = Path("results") / f"predictions_{base}_{self.var_tf.get()}.csv"
+        pred_abs = ROOT / pred_csv
+        if not pred_abs.exists():
+            messagebox.showwarning("Upozornění", f"Nejprve vygeneruj predikce ({pred_csv}).")
+            self.log_live_async(f"[WARN] Simulace nespustena: chybi {pred_csv}")
+            return
         minc = getattr(self, 'var_minc', tk.DoubleVar(value=0.55)).get()
         fee = getattr(self, 'var_fee', tk.DoubleVar(value=0.30)).get()
         allow = getattr(self, 'var_allow_short', tk.BooleanVar(value=True)).get()
         mclo = getattr(self, 'var_mclo', tk.DoubleVar(value=-1)).get()
-        tplo = getattr(self, 'var_tplo', tk.DoubleVar(value=0.0)).get()
         maxh = getattr(self, 'var_max_hold', tk.IntVar(value=0)).get()
+        tps = self._trade_pct_strong()
+        tplo_eff = self._trade_pct_low()
 
 
         cmd = [
             self.py(), str(SIM_SCRIPT),
             "--input", str(pred_csv),
             "--min_conf", f"{minc:.2f}",
-            "--fee_pct", f"{fee/100.0:.6f}"
+            "--fee_pct", f"{fee/100.0:.6f}",
+            "--trade_pct", f"{tps:.4f}",
         ]
-        if mclo > 0 and tplo > 0:
+        adv_notes = [f"trade_pct={tps:.4f} ({tps*100:.2f}%)", f"trade_pct_low(auto)={tplo_eff:.4f} ({tplo_eff*100:.2f}%)"]
+        if mclo > 0 and tplo_eff > 0:
             cmd += [
-            "--min_conf_low", f"{mclo:.2f}",
-            "--trade_pct_low", f"{tplo:.4f}"
-            ]    
+                "--min_conf_low", f"{mclo:.2f}",
+                "--trade_pct_low", f"{tplo_eff:.4f}"
+            ]
+            adv_notes.append(f"min_conf_low={mclo:.2f}, trade_pct_low={tplo_eff:.4f}")
+            if mclo >= minc:
+                adv_notes.append("POZOR: min_conf_low >= min_conf, slabé vstupy se prakticky nepoužijí")
+        elif mclo > 0 and tplo_eff <= 0:
+            adv_notes.append("POZOR: riziko na obchod je 0 %, slabé vstupy se nepoužijí")
+        else:
+            adv_notes.append("Slabé vstupy vypnuté (min_conf_low <= 0)")
         if maxh > 0:
             cmd += ["--max_hold_bars", f"{maxh}"]
+            adv_notes.append(f"max_hold_bars={maxh}")
         if allow:
             cmd.append("--allow_short")
-        run_cmd(cmd, self.log_async, ROOT)
+            adv_notes.append("allow_short=True")
+        else:
+            adv_notes.append("allow_short=False")
+
+        self.log_live_async("[SIM] Parametry: " + " | ".join(adv_notes))
+        self.log_async("[SIM] Parametry: " + " | ".join(adv_notes))
+
+        # Simulace se loguje jak do hlavního Logu, tak do panelu Live výstupu.
+        def _runner():
+            self.log_async(f">>> {' '.join(str(x) for x in cmd)}")
+            self.log_live_async(f">>> {' '.join(str(x) for x in cmd)}")
+            try:
+                with subprocess.Popen(
+                    [str(c) for c in cmd],
+                    cwd=str(ROOT),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                ) as p:
+                    for line in p.stdout:
+                        if line is not None:
+                            line = line.rstrip()
+                            self.log_async(line)
+                            self.log_live_async(line)
+                    ret = p.wait()
+                    if ret == 0:
+                        self.log_async("[OK] Simulace hotova.")
+                        self.log_live_async("[OK] Simulace hotova.")
+                    else:
+                        self.log_async(f"[CHYBA] Simulace skoncila s navratovym kodem {ret}.")
+                        self.log_live_async(f"[CHYBA] Simulace skoncila s navratovym kodem {ret}.")
+            except Exception as e:
+                self.log_async(f"[VYJIMKA] {e}")
+                self.log_live_async(f"[VYJIMKA] {e}")
+        threading.Thread(target=_runner, daemon=True).start()
 
     def on_scan(self):
         if not SCAN_SCRIPT.exists():
@@ -947,15 +1266,18 @@ class TradingGUI(tk.Tk):
         stop  = getattr(self, 'var_scan_stop',  tk.DoubleVar(value=0.70)).get()
         step  = getattr(self, 'var_scan_step',  tk.DoubleVar(value=0.01)).get()
         fee   = getattr(self, 'var_fee',        tk.DoubleVar(value=0.30)).get()
+        allow = getattr(self, 'var_allow_short', tk.BooleanVar(value=True)).get()
         out_csv = Path("results") / f"scan_min_conf_{pred_csv.stem}.csv"
         cmd = [self.py(), str(SCAN_SCRIPT),
                "--input", str(pred_csv),
-               "--allow_short",
                "--fee_pct", f"{fee/100.0:.6f}",
                "--start",   f"{start:.3f}",
                "--stop",    f"{stop:.3f}",
                "--step",    f"{step:.3f}",
                "--out_csv", str(out_csv)]
+        if allow:
+            cmd.append("--allow_short")
+        self.log_async(f"[SCAN] Parametry: min_conf_range={start:.2f}-{stop:.2f}/{step:.2f} | fee={fee:.2f}% | allow_short={allow}")
         self._run_scan_with_summary(cmd, ROOT / out_csv)
 
     def _run_scan_with_summary(self, cmd: list, out_csv: Path):
@@ -1005,7 +1327,7 @@ class TradingGUI(tk.Tk):
                 return default
 
         top_sharpe = sorted(rows, key=lambda r: _to_float(r.get("Sharpe")), reverse=True)[:5]
-        top_pnl = sorted(rows, key=lambda r: _to_float(r.get("PnL_%")), reverse=True)[:5]
+        best_pnl = sorted(rows, key=lambda r: _to_float(r.get("PnL_%")), reverse=True)[0]
 
         self.log_async("[SCAN] TOP podle Sharpe:")
         for r in top_sharpe:
@@ -1013,13 +1335,11 @@ class TradingGUI(tk.Tk):
                 f"min_conf={r.get('min_conf')} | PnL={r.get('PnL_%')}% | "
                 f"Sharpe={r.get('Sharpe')} | MaxDD={r.get('MaxDD_%')}% | Trades={r.get('Trades')}"
             )
-
-        self.log_async("[SCAN] TOP podle PnL_%:")
-        for r in top_pnl:
-            self.log_async(
-                f"min_conf={r.get('min_conf')} | PnL={r.get('PnL_%')}% | "
-                f"Sharpe={r.get('Sharpe')} | MaxDD={r.get('MaxDD_%')}% | Trades={r.get('Trades')}"
-            )
+        self.log_async(
+            "[SCAN] Nejvyšší PnL: "
+            f"min_conf={best_pnl.get('min_conf')} | PnL={best_pnl.get('PnL_%')}% | "
+            f"Sharpe={best_pnl.get('Sharpe')} | MaxDD={best_pnl.get('MaxDD_%')}% | Trades={best_pnl.get('Trades')}"
+        )
 
     def on_open_trades_file(self):
         path = Path(getattr(self, 'var_trades_path', tk.StringVar(value=str(RESULTS / 'trades_log.csv'))).get())
@@ -1107,9 +1427,11 @@ class TradingGUI(tk.Tk):
         try:
             for line in self._live_proc.stdout:
                 if line is None: break
-                self.log_async(line.rstrip())
+                line = line.rstrip()
+                self.log_live_async(line)
         except Exception as e:
             self.log_async(f"[VÝJIMKA Live] {e}")
+            self.log_live_async(f"[VÝJIMKA Live] {e}")
 
     def on_live_stop(self):
         if self._live_proc and self._live_proc.poll() is None:
@@ -1145,11 +1467,34 @@ class TradingGUI(tk.Tk):
             messagebox.showerror("Chyba", f"Soubor {live_py} nebyl nalezen.")
             return
 
+        tf = self.var_tf.get()
+        meta_path = ROOT / "models" / f"features_tv_{tf}.json"
+        mode_info = "single-stage"
+        model_info = ""
+        try:
+            if meta_path.exists():
+                meta = _load_json_robust(meta_path)
+                ts = meta.get("two_stage", {}) or {}
+                if bool(ts.get("enabled")) and (ts.get("model_path_trade") or meta.get("model_path_trade")) and (ts.get("model_path_dir") or meta.get("model_path_dir")):
+                    mode_info = "two-stage (AUTO z metadata)"
+                    model_info = f"trade={ts.get('model_path_trade') or meta.get('model_path_trade')} | dir={ts.get('model_path_dir') or meta.get('model_path_dir')}"
+                else:
+                    mode_info = "single-stage (AUTO z metadata)"
+                    model_info = f"model={meta.get('model_path', f'models/lstm_tv_{tf}.h5')}"
+        except Exception as e:
+            self.log_async(f"[WARN] Nelze nacist metadata pro Live info: {e}")
+
         cmd = [
             self.py(), str(live_py),
-            "--timeframe", self.var_tf.get(),
+            "--base", base,
+            "--timeframe", tf,
             "--min-conf",  str(getattr(self,'var_minc', tk.DoubleVar(value=0.55)).get()),
+            "--trade-pct", f"{self._trade_pct_strong():.4f}",
+            "--trade-pct-low", f"{self._trade_pct_low():.4f}",
         ]
+        mclo = getattr(self, 'var_mclo', tk.DoubleVar(value=-1)).get()
+        if mclo > 0:
+            cmd += ["--min-conf-low", f"{mclo:.2f}"]
 
         if getattr(self,'var_allow_short', tk.BooleanVar(value=True)).get():
             cmd.append("--allow-short")
@@ -1171,7 +1516,28 @@ class TradingGUI(tk.Tk):
         if alerts_csv:
             cmd += ["--alerts-csv", alerts_csv]
 
-        subprocess.Popen(cmd, cwd=str(ROOT))
+        if self._live_proc and self._live_proc.poll() is None:
+            try:
+                self._live_proc.terminate()
+            except Exception:
+                pass
+            self._live_proc = None
+
+        self.log_live_async(f"[LIVE] Rezim: {mode_info}")
+        if model_info:
+            self.log_live_async(f"[LIVE] Modely: {model_info}")
+        self.log_live_async(f"[LIVE] Data: base={base} | pred_csv=results/predictions_{base}_{tf}.csv")
+        self.log_live_async(
+            f"[LIVE] Risk: strong={self._trade_pct_strong()*100:.2f}% | "
+            f"weak(auto)={self._trade_pct_low()*100:.2f}%"
+        )
+        self.log_live_async(f">>> {' '.join(str(x) for x in cmd)}")
+
+        self._live_proc = subprocess.Popen(
+            cmd, cwd=str(ROOT),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        )
+        threading.Thread(target=self._pump_live_output, daemon=True).start()
         self.log("▶ Spuštěn Live monitor v novém okně. Zavřením okna se alerty vypnou.")
 if __name__ == "__main__":
     app = TradingGUI()

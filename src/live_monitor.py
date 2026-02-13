@@ -43,12 +43,19 @@ def read_csv_any(path: Path) -> pd.DataFrame:
         df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
     return df
 
-def run_script(cmd: list, cwd: Path) -> int:
+def run_script(cmd: list, cwd: Path):
     try:
-        p = subprocess.run([str(x) for x in cmd], cwd=str(cwd), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
-        return p.returncode
-    except Exception:
-        return 1
+        p = subprocess.run(
+            [str(x) for x in cmd],
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        out = (p.stdout or "").strip()
+        return p.returncode, out
+    except Exception as e:
+        return 1, str(e)
 
 class LiveWorker(threading.Thread):
     """Background worker: does fetch/predict/read, posts results to queue."""
@@ -76,17 +83,29 @@ class LiveWorker(threading.Thread):
         while not self._stop_evt.is_set():
             try:
                 if self.cfg.get("auto_fetch"):
-                    run_script([
+                    rc, out = run_script([
                         self.cfg["python"], str(self.cfg["fetch"])
                     ], Path(self.cfg["root"]))
+                    if rc != 0:
+                        self.q.put({"msg": f"[FETCH ERR] rc={rc} | {out[-240:] if out else 'bez vystupu'}"})
+                        time.sleep(self.cfg["refresh"])
+                        continue
 
-                run_script([
-                    self.cfg["python"], str(self.cfg["predict"]), "--timeframe", self.cfg["timeframe"]
-                ], Path(self.cfg["root"]))
+                predict_cmd = [
+                    self.cfg["python"], str(self.cfg["predict"]),
+                    "--timeframe", self.cfg["timeframe"],
+                    "--output", str(self.cfg["pred_csv"]),
+                ]
+                rc, out = run_script(predict_cmd, Path(self.cfg["root"]))
+                if rc != 0:
+                    self.q.put({"msg": f"[PREDICT ERR] rc={rc} | {out[-240:] if out else 'bez vystupu'}"})
+                    time.sleep(self.cfg["refresh"])
+                    continue
 
-                gold = read_csv_any(Path(self.cfg["root"]) / "data" / "raw" / f"gold_{self.cfg['timeframe']}.csv")
-                preds = read_csv_any(Path(self.cfg["root"]) / "results" / f"predictions_{self.cfg['timeframe']}.csv")
+                gold = read_csv_any(Path(self.cfg["gold_csv"]))
+                preds = read_csv_any(Path(self.cfg["pred_csv"]))
                 if gold.empty or preds.empty:
+                    self.q.put({"msg": f"[WAIT] prazdna data: gold={gold.empty} preds={preds.empty}"})
                     time.sleep(self.cfg["refresh"])
                     continue
 
@@ -95,7 +114,7 @@ class LiveWorker(threading.Thread):
                     preds.sort_values("date")[[c for c in ["date","signal","signal_strength","proba_no_trade","proba_trade","proba_buy","proba_sell","vol_dead","atr_norm","bb_width"] if c in preds.columns]],
                     on="date",
                     direction="backward"
-                ).iloc[-2000:]
+                ).iloc[-180:]
 
                 # === Rozhodnutí beru přímo z predikčního CSV (signal + signal_strength) ===
                 last_row = df.iloc[-1]
@@ -132,7 +151,7 @@ class LiveWorker(threading.Thread):
                     "vol_dead": int(last_row.get("vol_dead", 0)) if str(last_row.get("vol_dead", 0)).strip() != '' else 0,
                     "atr_norm": float(last_row.get("atr_norm", float('nan'))),
                     "bb_width": float(last_row.get("bb_width", float('nan'))),
-                    "msg": f"Updated {last_dt}"
+                    "msg": f"Updated {last_dt} | conf={conf:.2f} | sig={sig}"
                 }
                 self.q.put(payload)
 
@@ -267,6 +286,12 @@ class LiveMonitor(tk.Tk):
                 self._last_alert_dt = last_dt
                 self._beep_strong(sig)
                 self._append_alert_csv(payload)
+        if new_bar:
+            try:
+                human = "BUY" if sig == 1 else ("SELL" if sig == 2 else "NO_TRADE")
+                print(f"[LIVE] {last_dt} | {human} | conf={conf:.3f}", flush=True)
+            except Exception:
+                pass
 
         if sig==1 and strong:
             self.action_lbl.config(text=f"BUY STRONG ({conf:.2f}) | size≈{self.cfg['trade_pct']*100:.1f}%", bg="#27ae60")
@@ -418,6 +443,7 @@ def main():
     import argparse
 
     ap = argparse.ArgumentParser(description='Live Monitor (fast, threaded)')
+    ap.add_argument('--base', type=str, default='gold')
     ap.add_argument('--timeframe', choices=['5m','1h'], default='5m')
     ap.add_argument('--min-conf', dest='min_conf', type=float, default=0.55)
     ap.add_argument('--allow-short', action='store_true')
@@ -433,7 +459,12 @@ def main():
     ap.add_argument("--alerts-csv", type=str, default=None, help="Cesta k CSV pro STRONG alerty (default results/live_alerts_<tf>.csv)")
     args = ap.parse_args()
 
+    base = (args.base or "gold").strip().lower()
+    gold_csv = ROOT / "data" / "raw" / f"{base}_{args.timeframe}.csv"
+    pred_csv = ROOT / "results" / f"predictions_{base}_{args.timeframe}.csv"
+
     cfg = {
+        'base'       : base,
         'timeframe'  : args.timeframe,
         'min_conf'   : args.min_conf,
         'allow_short': bool(args.allow_short),
@@ -444,6 +475,8 @@ def main():
         'root'       : str(ROOT),
         'fetch'      : SCRIPTS / 'fetch_tradingview_data.py',
         'predict'    : SCRIPTS / 'predict_lstm_tradingview.py',
+        'gold_csv'   : str(gold_csv),
+        'pred_csv'   : str(pred_csv),
         'min_conf_low': args.min_conf_low,
         'trade_pct'  : args.trade_pct,
         'trade_pct_low': args.trade_pct_low,
@@ -453,6 +486,7 @@ def main():
         'alerts_csv' : args.alerts_csv,
     }
 
+    print(f"[LIVE] base={base} tf={args.timeframe} gold_csv={gold_csv} pred_csv={pred_csv}", flush=True)
     app = LiveMonitor(cfg)
     app.mainloop()
 
