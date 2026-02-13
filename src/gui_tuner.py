@@ -655,6 +655,9 @@ class TradingGUI(tk.Tk):
         row_btns.pack(fill='x')
         tk.Button(row_btns, text="📊 Spustit simulaci",  width=20, command=self.on_simulate).pack(side='left')
         tk.Button(row_btns, text="📡 Spustit Live režim", width=20, command=self.on_open_live_monitor).pack(side='left', padx=8)
+        tk.Button(row_btns, text="Stop Live rezim", width=18, command=self.on_stop_live_monitor).pack(side='left', padx=4)
+        self.var_live_status = tk.StringVar(value="Live: zastaveno")
+        tk.Label(row_btns, textvariable=self.var_live_status, fg="#2c3e50").pack(side='right')
 
 
         # Nastavení Live monitoru (graf + pípání + CSV log STRONG alertů)
@@ -1419,6 +1422,7 @@ class TradingGUI(tk.Tk):
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
             )
             threading.Thread(target=self._pump_live_output, daemon=True).start()
+            self._set_live_status("bezi")
             self.log("[INFO] Live Alerts spuštěny.")
         except Exception as e:
             messagebox.showerror("Chyba", str(e))
@@ -1426,12 +1430,41 @@ class TradingGUI(tk.Tk):
     def _pump_live_output(self):
         try:
             for line in self._live_proc.stdout:
-                if line is None: break
+                if line is None:
+                    break
                 line = line.rstrip()
+                l = line.lower()
+                if "[fetch err]" in l or "[predict err]" in l or "worker error" in l:
+                    self._set_live_status("chyba")
+                elif "[wait]" in l:
+                    self._set_live_status("ceka")
+                elif line.startswith("[LIVE]") or "updated" in l:
+                    self._set_live_status("bezi")
                 self.log_live_async(line)
         except Exception as e:
-            self.log_async(f"[VÝJIMKA Live] {e}")
-            self.log_live_async(f"[VÝJIMKA Live] {e}")
+            self._set_live_status("chyba")
+            self.log_async(f"[V??JIMKA Live] {e}")
+            self.log_live_async(f"[V??JIMKA Live] {e}")
+        finally:
+            try:
+                if self._live_proc is None or self._live_proc.poll() is not None:
+                    self._set_live_status("zastaveno")
+            except Exception:
+                pass
+
+    def on_stop_live_monitor(self):
+        if self._live_proc and self._live_proc.poll() is None:
+            try:
+                self._live_proc.terminate()
+                self._live_proc = None
+                self._set_live_status("zastaveno")
+                self.log_live_async("[LIVE] monitor zastaven uzivatelem.")
+            except Exception as e:
+                self._set_live_status("chyba")
+                messagebox.showerror("Chyba", str(e))
+        else:
+            self._set_live_status("zastaveno")
+            self.log_live_async("[LIVE] monitor uz nebezi.")
 
     def on_live_stop(self):
         if self._live_proc and self._live_proc.poll() is None:
@@ -1460,10 +1493,18 @@ class TradingGUI(tk.Tk):
         except Exception as e:
             messagebox.showerror("Chyba", str(e))
 
+    def _set_live_status(self, text: str):
+        try:
+            self.var_live_status.set(f"Live: {text}")
+        except Exception:
+            pass
+
     def on_open_live_monitor(self):
 
+        self._set_live_status("spoustim")
         live_py = Path(ROOT) / "src" / "live_monitor.py"
         if not live_py.exists():
+            self._set_live_status("chyba")
             messagebox.showerror("Chyba", f"Soubor {live_py} nebyl nalezen.")
             return
 

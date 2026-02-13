@@ -87,7 +87,9 @@ class LiveWorker(threading.Thread):
                         self.cfg["python"], str(self.cfg["fetch"])
                     ], Path(self.cfg["root"]))
                     if rc != 0:
-                        self.q.put({"msg": f"[FETCH ERR] rc={rc} | {out[-240:] if out else 'bez vystupu'}"})
+                        msg = f"[FETCH ERR] rc={rc} | {out[-240:] if out else 'bez vystupu'}"
+                        print(msg, flush=True)
+                        self.q.put({"msg": msg})
                         time.sleep(self.cfg["refresh"])
                         continue
 
@@ -98,14 +100,18 @@ class LiveWorker(threading.Thread):
                 ]
                 rc, out = run_script(predict_cmd, Path(self.cfg["root"]))
                 if rc != 0:
-                    self.q.put({"msg": f"[PREDICT ERR] rc={rc} | {out[-240:] if out else 'bez vystupu'}"})
+                    msg = f"[PREDICT ERR] rc={rc} | {out[-240:] if out else 'bez vystupu'}"
+                    print(msg, flush=True)
+                    self.q.put({"msg": msg})
                     time.sleep(self.cfg["refresh"])
                     continue
 
                 gold = read_csv_any(Path(self.cfg["gold_csv"]))
                 preds = read_csv_any(Path(self.cfg["pred_csv"]))
                 if gold.empty or preds.empty:
-                    self.q.put({"msg": f"[WAIT] prazdna data: gold={gold.empty} preds={preds.empty}"})
+                    msg = f"[WAIT] prazdna data: gold={gold.empty} preds={preds.empty}"
+                    print(msg, flush=True)
+                    self.q.put({"msg": msg})
                     time.sleep(self.cfg["refresh"])
                     continue
 
@@ -157,7 +163,9 @@ class LiveWorker(threading.Thread):
 
 
             except Exception as e:
-                self.q.put({"msg": f"Worker error: {e}"})
+                msg = f"Worker error: {e}"
+                print(msg, flush=True)
+                self.q.put({"msg": msg})
 
             time.sleep(self.cfg["refresh"])
 
