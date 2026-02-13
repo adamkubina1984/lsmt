@@ -120,10 +120,13 @@ class LiveWorker(threading.Thread):
                     preds.sort_values("date")[[c for c in ["date","signal","signal_strength","proba_no_trade","proba_trade","proba_buy","proba_sell","vol_dead","atr_norm","bb_width"] if c in preds.columns]],
                     on="date",
                     direction="backward"
-                ).iloc[-180:]
+                ).iloc[-2000:]
 
                 # === Rozhodnutí beru přímo z predikčního CSV (signal + signal_strength) ===
-                last_row = df.iloc[-1]
+                # DŮLEŽITÉ: pro live rozhodování použij poslední UZAVŘENOU svíčku
+                # (poslední řádek může být právě tvořená svíčka -> nestabilní/noisy stav).
+                row_idx = -2 if len(df) >= 2 else -1
+                last_row = df.iloc[row_idx]
                 last_dt = last_row.get("date")
                 try:
                     sig = int(last_row.get("signal", 0))
@@ -157,7 +160,7 @@ class LiveWorker(threading.Thread):
                     "vol_dead": int(last_row.get("vol_dead", 0)) if str(last_row.get("vol_dead", 0)).strip() != '' else 0,
                     "atr_norm": float(last_row.get("atr_norm", float('nan'))),
                     "bb_width": float(last_row.get("bb_width", float('nan'))),
-                    "msg": f"Updated {last_dt} | conf={conf:.2f} | sig={sig}"
+                    "msg": f"Updated closed bar {last_dt} | conf={conf:.2f} | sig={sig}"
                 }
                 self.q.put(payload)
 
@@ -380,13 +383,18 @@ class LiveMonitor(tk.Tk):
                           facecolor=ccol, edgecolor=ccol, alpha=0.85, zorder=3)
             )
 
-        # 3) Markery signálů (jen nad prahem)
-        buy_idx  = (sig_a == 1) & (conf_a >= self.cfg['min_conf'])
-        sell_idx = (sig_a == 2) & (conf_a >= self.cfg['min_conf'])
-        h_buy = self.ax_price.scatter(x[buy_idx],  c[buy_idx],  marker='^', s=80, c='green', label='BUY', zorder=4)
+        # 3) Markery signálů (jen ENTRY body, ne každá svíčka)
+        strong_buy = (sig_a == 1) & (conf_a >= self.cfg['min_conf'])
+        strong_sell = (sig_a == 2) & (conf_a >= self.cfg['min_conf'])
+        prev_buy = np.r_[False, strong_buy[:-1]]
+        prev_sell = np.r_[False, strong_sell[:-1]]
+        buy_idx = strong_buy & (~prev_buy)
+        sell_idx = strong_sell & (~prev_sell)
+
+        h_buy = self.ax_price.scatter(x[buy_idx], c[buy_idx], marker='^', s=80, c='green', label='BUY entry', zorder=4)
         h_sell = None
         if self.cfg['allow_short']:
-            h_sell = self.ax_price.scatter(x[sell_idx], c[sell_idx], marker='v', s=80, c='red',   label='SELL', zorder=4)
+            h_sell = self.ax_price.scatter(x[sell_idx], c[sell_idx], marker='v', s=80, c='red', label='SELL entry', zorder=4)
 
         # 4) Legenda pro pásy + markery
         from matplotlib.patches import Patch
@@ -423,7 +431,9 @@ class LiveMonitor(tk.Tk):
                               color='gray', linestyle='--', alpha=0.5, label=f"min_conf_low {self.cfg['min_conf_low']:.2f}")
 
         # Titulek a vzhled
-        self.ax_price.set_title(f"TF={self.cfg['timeframe']} | window={N} | last={last_dt} | conf={conf:.2f}")
+        self.ax_price.set_title(
+            f"TF={self.cfg['timeframe']} | window={N} | last={last_dt} | last_conf={conf:.2f} | min_conf={self.cfg['min_conf']:.2f}"
+        )
         self.ax_price.grid(True, linestyle='--', alpha=0.3)
         self.ax_conf.legend(loc='upper left', fontsize=8)
         self.ax_conf.grid(True, linestyle='--', alpha=0.3)

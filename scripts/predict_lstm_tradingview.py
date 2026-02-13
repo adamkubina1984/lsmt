@@ -339,25 +339,12 @@ def predict(timeframe: str,
     scaler = None
     if not use_two_stage:
         scaler = joblib.load(scaler_path)
-        # --- feature_cols: z meta nebo bezpečný dopočet z features + zarovnání na scaler ---
         if not feature_cols:
-            gold_tmp = add_indicators(gold.copy(), wanted_feats)
-            feature_cols = _infer_feature_cols_from_features(gold_tmp, wanted_feats)
-            try:
-                sc_tmp = joblib.load(scaler_path)
-                nfi = getattr(sc_tmp, "n_features_in_", None)
-                if nfi is not None:
-                    candidates = ["bb_pos","bb_width","bb_ma","bb_up","bb_lo","rsi14","ema100","ema100_dist","adx","stoch_k","stoch_d","vwap","sar"]
-                    for c in candidates:
-                        if len(feature_cols) >= nfi:
-                            break
-                        if c in gold_tmp.columns and c not in feature_cols:
-                            feature_cols.append(c)
-                    if len(feature_cols) > nfi:
-                        feature_cols = feature_cols[:nfi]
-                print(f"[INFO] feature_cols inferováno ({len(feature_cols)} sloupců) z features={wanted_feats}", flush=True)
-            except Exception as e:
-                print("[WARN] Nepodařilo se zarovnat na scaler:", e, flush=True)
+            raise ValueError(
+                "Metadata neobsahují 'feature_cols'. "
+                "Predikce je zastavena kvůli ochraně konzistence feature pořadí. "
+                "Spusť znovu trénink a ulož aktuální metadata."
+            )
 
     # === Two-stage scaler paths ===
     scaler_path_trade = os.path.join(ROOT_DIR, req_scaler_trade) if req_scaler_trade else None
@@ -373,10 +360,20 @@ def predict(timeframe: str,
         if ind_cols:
             print(f"[INFO] Přidané indikátory v predikci: {ind_cols}")
 
-        # doplň feature_cols
-        for col in feature_cols:
-            if col not in gold_mc.columns:
-                gold_mc[col] = 0.0
+        nfi = getattr(scaler, "n_features_in_", None)
+        if nfi is not None and int(nfi) != int(len(feature_cols)):
+            raise ValueError(
+                f"Nesoulad scaleru a metadata: scaler očekává {nfi} featur, "
+                f"ale metadata mají {len(feature_cols)}."
+            )
+
+        missing_cols = [col for col in feature_cols if col not in gold_mc.columns]
+        if missing_cols:
+            raise ValueError(
+                "V datech/příznacích chybí sloupce požadované metadaty: "
+                f"{missing_cols[:12]}{' ...' if len(missing_cols) > 12 else ''}. "
+                "Predikce zastavena (bez tichého doplňování nul)."
+            )
 
         X_df = gold_mc[feature_cols].copy().ffill().bfill()
         print("[DBG] SINGLE scaler:", _short(scaler_path), "| n_features_in_ =", getattr(scaler, "n_features_in_", None),
@@ -449,13 +446,19 @@ def predict(timeframe: str,
     else:
         gold_feat["vol_dead"] = 0
 
-    # 3) Připrav featury pro trade a direction (fill chybějících sloupců)
-    for col in fcols_trade:
-        if col not in gold_feat.columns:
-            gold_feat[col] = gold[col] if col in gold.columns else 0.0
-    for col in fcols_dir:
-        if col not in gold_feat.columns:
-            gold_feat[col] = gold[col] if col in gold.columns else 0.0
+    # 3) Připrav featury pro trade a direction (bez tichého doplňování)
+    miss_trade = [c for c in fcols_trade if c not in gold_feat.columns]
+    miss_dir = [c for c in fcols_dir if c not in gold_feat.columns]
+    if miss_trade:
+        raise ValueError(
+            "Two-stage TRADE: chybí požadované feature sloupce: "
+            f"{miss_trade[:12]}{' ...' if len(miss_trade) > 12 else ''}."
+        )
+    if miss_dir:
+        raise ValueError(
+            "Two-stage DIR: chybí požadované feature sloupce: "
+            f"{miss_dir[:12]}{' ...' if len(miss_dir) > 12 else ''}."
+        )
 
     if nfi_trade is not None and nfi_trade != len(fcols_trade):
         raise ValueError(f"[TRADE] Nesoulad: scaler očekává {nfi_trade} featur, ale feature_cols_trade má {len(fcols_trade)}.")

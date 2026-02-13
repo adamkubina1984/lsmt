@@ -13,6 +13,7 @@ import argparse
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, confusion_matrix
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
@@ -81,12 +82,59 @@ def _merge_asof(left_df: pd.DataFrame, right_df: pd.DataFrame, right_col: str, o
     return merged
 
 
-def _make_labels(close: pd.Series, horizon: int, thr_pct: float) -> pd.Series:
+def _make_labels(close: pd.Series, horizon: int, thr_up_pct: float, thr_dn_pct: float) -> pd.Series:
     ret_fwd = (close.shift(-horizon) - close) / close * 100.0
     labels = pd.Series(0, index=close.index)  # 0 = No-Trade
-    labels[ret_fwd > thr_pct] = 1           # 1 = Buy
-    labels[ret_fwd < -thr_pct] = 2          # 2 = Sell
+    labels[ret_fwd > float(thr_up_pct)] = 1           # 1 = Buy
+    labels[ret_fwd < -float(thr_dn_pct)] = 2          # 2 = Sell
     return labels
+
+def _adaptive_label_thresholds(close: pd.Series, horizon: int, train_end_idx: int, target_side_frac: float, fallback_thr: float):
+    """
+    Vypočte adaptivní prahy z TRAIN části (bez leakage):
+    - thr_up_pct = (1 - q) kvantil budoucích výnosů
+    - thr_dn_pct = absolutní hodnota q kvantilu
+    """
+    ret_fwd = ((close.shift(-horizon) - close) / close * 100.0).iloc[:train_end_idx].dropna()
+    if ret_fwd.empty:
+        return float(fallback_thr), float(fallback_thr)
+    q = float(max(0.01, min(0.30, target_side_frac)))
+    thr_up = float(ret_fwd.quantile(1.0 - q))
+    thr_dn = float(abs(ret_fwd.quantile(q)))
+    # robust fallback proti degeneraci
+    if not np.isfinite(thr_up) or thr_up <= 0:
+        thr_up = float(fallback_thr)
+    if not np.isfinite(thr_dn) or thr_dn <= 0:
+        thr_dn = float(fallback_thr)
+    return thr_up, thr_dn
+
+def _rebalance_multiclass_sequences(X: np.ndarray, y: np.ndarray, strength: float = 0.5, seed: int = 42):
+    """
+    Mírný oversampling menšinových tříd:
+    strength=0.0 -> beze změny
+    strength=1.0 -> plná balance na počet majoritní třídy
+    """
+    s = float(max(0.0, min(1.0, strength)))
+    if s <= 0.0:
+        return X, y
+    rng = np.random.default_rng(seed)
+    classes, counts = np.unique(y, return_counts=True)
+    if len(classes) < 2:
+        return X, y
+    max_count = int(counts.max())
+    idx_all = []
+    for c, cnt in zip(classes, counts):
+        idx_c = np.where(y == c)[0]
+        target = int(round(cnt + (max_count - cnt) * s))
+        if target <= cnt:
+            chosen = idx_c
+        else:
+            extra = rng.choice(idx_c, size=(target - cnt), replace=True)
+            chosen = np.concatenate([idx_c, extra])
+        idx_all.append(chosen)
+    idx_all = np.concatenate(idx_all)
+    rng.shuffle(idx_all)
+    return X[idx_all], y[idx_all]
 
 
 def _build_sequences(X: np.ndarray, y: np.ndarray, seq_len: int, split_index: int):
@@ -117,6 +165,9 @@ def train_lstm(
     features: str = "rsi,macd,ema20,bb,atr",
     output_dir: str = "models",
     mode: str = "multi",                  # << přidán parametr
+    label_mode: str = "fixed",
+    target_side_frac: float = 0.10,
+    rebalance_strength: float = 0.50,
     use_dxy: bool = False,
     use_cot: bool = False
 ):
@@ -198,7 +249,26 @@ def train_lstm(
     print(f"[INFO] Přidané indikátorové sloupce: {indicator_cols}")
 
     # --- Labely a střih do validního rozpětí ---
-    labels = _make_labels(gold["close"], horizon=horizon, thr_pct=thr_pct)
+    valid_len = len(gold) - horizon
+    if valid_len <= 0:
+        raise ValueError("Příliš málo dat vzhledem k horizon.")
+
+    # prahy labelů počítáme z TRAIN části (bez leakage)
+    split_for_thr = int(valid_len * 0.8)
+    if label_mode == "adaptive":
+        thr_up_pct, thr_dn_pct = _adaptive_label_thresholds(
+            close=gold["close"].iloc[:valid_len],
+            horizon=horizon,
+            train_end_idx=split_for_thr,
+            target_side_frac=target_side_frac,
+            fallback_thr=thr_pct
+        )
+        print(f"[INFO] Adaptive label thresholds: up={thr_up_pct:.4f}% | down={thr_dn_pct:.4f}% | target_side_frac={target_side_frac:.3f}")
+    else:
+        thr_up_pct, thr_dn_pct = float(thr_pct), float(thr_pct)
+        print(f"[INFO] Fixed label thresholds: up={thr_up_pct:.4f}% | down={thr_dn_pct:.4f}%")
+
+    labels = _make_labels(gold["close"], horizon=horizon, thr_up_pct=thr_up_pct, thr_dn_pct=thr_dn_pct)
     valid_len = len(gold) - horizon
     gold = gold.iloc[:valid_len].copy()
     labels = labels.iloc[:valid_len].copy()
@@ -238,8 +308,20 @@ def train_lstm(
     if X_train.shape[0] == 0 or X_val.shape[0] == 0:
         raise ValueError("Po vytvoření sekvencí nemám žádná trénovací/validační data.")
 
+    # kontrolní distribuce labelů
+    tr_u, tr_c = np.unique(y_train, return_counts=True)
+    va_u, va_c = np.unique(y_val, return_counts=True)
+    print("[INFO] Label dist TRAIN:", {int(k): int(v) for k, v in zip(tr_u, tr_c)})
+    print("[INFO] Label dist VAL:  ", {int(k): int(v) for k, v in zip(va_u, va_c)})
+
     # --- větvení podle režimu ---
     if mode == "multi":
+        # mírný oversampling menšinových tříd zlepšuje recall BUY/SELL
+        X_train, y_train = _rebalance_multiclass_sequences(
+            X_train, y_train, strength=rebalance_strength, seed=42
+        )
+        tr_u2, tr_c2 = np.unique(y_train, return_counts=True)
+        print(f"[INFO] Rebalance strength={rebalance_strength:.2f} -> TRAIN dist:", {int(k): int(v) for k, v in zip(tr_u2, tr_c2)})
         last = Dense(3, activation='softmax')
         loss = "sparse_categorical_crossentropy"
         y_tr, y_va = y_train, y_val
@@ -292,6 +374,25 @@ def train_lstm(
               callbacks=[es], verbose=1,
               class_weight=class_weight)
 
+    # --- validační report (lepší než samotná accuracy) ---
+    try:
+        val_pred_raw = model.predict(X_val, verbose=0)
+        if mode == "multi":
+            y_hat = np.argmax(val_pred_raw, axis=1).astype(int)
+            labels = [0, 1, 2]
+            names = ["NO_TRADE", "BUY", "SELL"]
+        else:
+            y_hat = (val_pred_raw.reshape(-1) >= 0.5).astype(int)
+            labels = [0, 1]
+            names = ["NEG", "POS"]
+
+        print("[INFO] Val confusion matrix:")
+        print(confusion_matrix(y_va, y_hat, labels=labels))
+        print("[INFO] Val classification report:")
+        print(classification_report(y_va, y_hat, labels=labels, target_names=names, digits=4, zero_division=0))
+    except Exception as e:
+        print(f"[WARN] Val report se nepodařilo spočítat: {e}")
+
     # --- uložení ---
     if mode == "trade":
         model_name = f"lstm_trade_{timeframe}.h5"
@@ -325,6 +426,11 @@ def train_lstm(
     meta["timeframe"] = timeframe
     meta["seq_len"] = seq_len
     meta["threshold_pct"] = thr_pct
+    meta["threshold_up_pct"] = float(thr_up_pct)
+    meta["threshold_dn_pct"] = float(thr_dn_pct)
+    meta["label_mode"] = str(label_mode)
+    meta["target_side_frac"] = float(target_side_frac)
+    meta["rebalance_strength"] = float(rebalance_strength)
     meta["cot_shift_days"] = int(cot_shift_days)
     meta["use_dxy"] = bool(use_dxy)
     meta["use_cot"] = bool(use_cot)
@@ -384,6 +490,9 @@ if __name__ == "__main__":
     parser.add_argument("--use_cot", action="store_true", help="Zapnout COT feature v train pipeline.")
     parser.add_argument("--features", type=str, default="rsi,macd,ema20,bb,atr", help="Seznam indikátorů oddělených čárkou (např. rsi,macd,ema20,bb,atr)")
     parser.add_argument("--mode", choices=["multi", "trade", "direction"], default="multi", help="multi = původní 3-class; trade = binární Trade/NoTrade; direction = binární Buy/Sell (jen na samplech, kde nebyl No-Trade)")
+    parser.add_argument("--label_mode", choices=["fixed", "adaptive"], default="fixed", help="fixed: stejné prahy ±thr_pct | adaptive: prahy z train kvantilů.")
+    parser.add_argument("--target_side_frac", type=float, default=0.10, help="Jen pro adaptive: cílený podíl každého směru (BUY/SELL) v train labels.")
+    parser.add_argument("--rebalance_strength", type=float, default=0.50, help="Míra oversamplingu tříd v multi režimu (0..1).")
 
     args = parser.parse_args()
 
@@ -400,5 +509,8 @@ if __name__ == "__main__":
         use_cot=args.use_cot,
         features=args.features,
         output_dir=args.output_dir,
-        mode=args.mode              # << přidáno
+        mode=args.mode,             # << přidáno
+        label_mode=args.label_mode,
+        target_side_frac=args.target_side_frac,
+        rebalance_strength=args.rebalance_strength
     )

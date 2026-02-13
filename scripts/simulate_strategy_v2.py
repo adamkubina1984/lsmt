@@ -21,6 +21,7 @@ def simulate(path_csv,
              fee_pct=0.003,
              allow_short=True,
              min_conf=0.6,
+             timeframe="auto",
              # 👇 nové volitelné prahy pro „slabší“ vstup:
              min_conf_low=None,
              trade_pct_low=None,
@@ -352,16 +353,36 @@ def simulate(path_csv,
         equity_rows.append({'date': last_date, 'equity': cur_equity})
 
     # ---------- metriky ----------
+    def _bars_per_day_from_df(df_local, tf_hint="auto"):
+        tf_hint = str(tf_hint or "auto").lower()
+        if tf_hint == "5m":
+            return 288.0
+        if tf_hint == "1h":
+            return 24.0
+        # auto-infer z mediánu časového kroku
+        try:
+            dt = pd.to_datetime(df_local["date"], errors="coerce").dropna().sort_values()
+            if len(dt) < 3:
+                return 288.0
+            step_min = float(dt.diff().dropna().dt.total_seconds().median() / 60.0)
+            if step_min <= 0:
+                return 288.0
+            return max(1.0, 1440.0 / step_min)
+        except Exception:
+            return 288.0
+
     eq = pd.DataFrame(equity_rows).drop_duplicates(subset=['date']).set_index('date').sort_index()
     rets = eq['equity'].pct_change().fillna(0.0)
-    sharpe = (rets.mean()/rets.std())*np.sqrt(252) if rets.std()>0 else 0.0
+    bars_per_day = _bars_per_day_from_df(df, timeframe)
+    annual_factor = np.sqrt(252.0 * bars_per_day)
+    sharpe = (rets.mean()/rets.std())*annual_factor if rets.std()>0 else 0.0
     dd = (eq['equity'] / eq['equity'].cummax()) - 1.0
     max_dd = dd.min() * 100.0
     final_val = eq['equity'].iloc[-1]
     pnl_pct = (final_val / initial_capital - 1.0) * 100.0
 
     print("=== SIMULACE v2 ===")
-    print(f"allow_short={allow_short}, min_conf={min_conf:.2f}, fee={fee_pct*100:.2f}%")
+    print(f"allow_short={allow_short}, min_conf={min_conf:.2f}, fee={fee_pct*100:.2f}%, tf={timeframe}, bars/day={bars_per_day:.2f}")
     print(f"Final Value:      {final_val:,.2f} CZK")
     print(f"Total Return %:   {pnl_pct:.2f}%")
     print(f"Sharpe Ratio:     {sharpe:.2f}")
@@ -417,6 +438,8 @@ if __name__ == "__main__":
     ap.add_argument("--fee_pct", type=float, default=0.003, help="0.003 = 0.3 %")
     ap.add_argument("--allow_short", action="store_true")
     ap.add_argument("--min_conf", type=float, default=0.6)
+    ap.add_argument("--timeframe", choices=["auto", "5m", "1h"], default="auto",
+                    help="Pro annualizaci Sharpe a konzistentní report.")
     ap.add_argument("--trades_csv", type=str, default=None, help="cesta k výslednému trades CSV")
     ap.add_argument("--equity_csv", type=str, default=None, help="cesta k výslednému equity CSV")
     ap.add_argument("--equity_png", type=str, default=None, help="cesta k PNG grafu equity")
@@ -434,6 +457,7 @@ if __name__ == "__main__":
         fee_pct=args.fee_pct,
         allow_short=args.allow_short,
         min_conf=args.min_conf,
+        timeframe=args.timeframe,
         trades_csv=args.trades_csv,
         equity_csv=args.equity_csv,
         equity_png=args.equity_png,

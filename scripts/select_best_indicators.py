@@ -24,7 +24,7 @@ DEFAULT_SIMULATE_SCRIPT = "scripts/simulate_strategy_v2.py"
 MODELS_DIR = Path("models")
 RESULTS_DIR = Path("results")
 
-def run_pipeline(indicators, timeframe, min_trades_per_day):
+def run_pipeline(indicators, timeframe, min_trades_per_day, eval_tail_frac=0.2, min_eval_rows=600):
     """
     Natrénuje model, provede predikci a spustí simulaci pro daný set indikátorů.
     Logy běží nebufferovaně (python -u), aby v GUI tekly průběžně.
@@ -51,8 +51,25 @@ def run_pipeline(indicators, timeframe, min_trades_per_day):
     subprocess.run(pred_cmd, check=True)
 
     # 3) Simulace (STREAM výstupu)
+    #    Hodnotíme out-of-sample tail predikcí (default posledních 20 %),
+    #    aby evoluce nepřeučovala čistě na in-sample.
+    eval_pred = out_pred
+    try:
+        df_pred = pd.read_csv(out_pred)
+        n_all = len(df_pred)
+        n_tail = int(n_all * float(eval_tail_frac))
+        if n_tail >= int(min_eval_rows) and n_tail < n_all:
+            eval_pred = RESULTS_DIR / f"predictions_{timeframe}_eval_tail_tmp.csv"
+            df_pred.tail(n_tail).to_csv(eval_pred, index=False)
+            print(f"[EVAL] OOS tail: {n_tail}/{n_all} řádků ({eval_tail_frac:.2f})", flush=True)
+        else:
+            print(f"[EVAL] OOS tail vynechán (n_all={n_all}, n_tail={n_tail}, min_eval_rows={min_eval_rows})", flush=True)
+    except Exception as e:
+        print(f"[WARN] Nelze připravit OOS tail, použiju celé predikce: {e}", flush=True)
+        eval_pred = out_pred
+
     sim_cmd = [sys.executable, "-u", str(DEFAULT_SIMULATE_SCRIPT),
-               "--input", str(out_pred),
+               "--input", str(eval_pred),
                "--min_conf", "0.45",
                "--fee_pct", "0.003",
                "--allow_short"]
@@ -112,6 +129,10 @@ def main():
     parser.add_argument("--generations", type=int, default=5)
     parser.add_argument("--population_size", type=int, default=6)
     parser.add_argument("--min_trades_per_day", type=int, default=3)
+    parser.add_argument("--eval_tail_frac", type=float, default=0.2,
+                        help="Jaká část konce predikcí se použije pro OOS hodnocení (0-1).")
+    parser.add_argument("--min_eval_rows", type=int, default=600,
+                        help="Minimální počet řádků OOS části, jinak se použijí celé predikce.")
     args = parser.parse_args()
 
     pop_size = args.population_size
@@ -125,7 +146,13 @@ def main():
         print(f"\n=== Generace {gen+1}/{generations} ===")
         gen_results = []
         for inds in population:
-            pnl, used_inds = run_pipeline(inds, tf, args.min_trades_per_day)
+            pnl, used_inds = run_pipeline(
+                inds,
+                tf,
+                args.min_trades_per_day,
+                eval_tail_frac=args.eval_tail_frac,
+                min_eval_rows=args.min_eval_rows
+            )
             gen_results.append((pnl, used_inds))
 
         gen_results.sort(reverse=True, key=lambda x: x[0])

@@ -256,7 +256,7 @@ class TradingGUI(tk.Tk):
 
     def _build_ui(self):
         # Sdílené proměnné mezi záložkami (propisují se automaticky)
-        self.var_minc = tk.DoubleVar(value=0.55)
+        self.var_minc = tk.DoubleVar(value=0.50)
         self.var_mclo = tk.DoubleVar(value=0.45)
         self.var_max_hold = tk.IntVar(value=0)
         self.var_allow_short = tk.BooleanVar(value=True)
@@ -490,7 +490,7 @@ class TradingGUI(tk.Tk):
             adv_pred,
             "Pokročilé parametry simulace/live (sdílené mezi záložkami).\n"
             "Výchozí start:\n"
-            "min_conf=0.55, min_conf_low=0.45, max_hold=0 (vypnuto).\n"
+            "min_conf=0.50, min_conf_low=0.45, max_hold=0 (vypnuto).\n"
             "trade_pct_low se počítá automaticky z Riziko na obchod (%).\n"
             "Pravidlo: min_conf_low musí být menší než min_conf."
         )
@@ -718,7 +718,7 @@ class TradingGUI(tk.Tk):
         ent_maxh.pack(side='left', padx=(4,12))
 
         create_tooltip(adv, "Ladici simulace: min_conf_low je prah pro slabsi signal, trade_pct_low se odvodi z rizika (40 % STRONG), max_hold je casovy limit drzeni (v barech). Nastav -1/0 pro deaktivaci.")
-        create_tooltip(ent_minc, "Vychozi: 0.55. Doporuceny rozsah cca 0.45-0.60.")
+        create_tooltip(ent_minc, "Vychozi: 0.50. Doporuceny rozsah cca 0.47-0.56 (vice obchodu 0.47, prisnejsi filtr 0.56).")
         create_tooltip(ent_fee, "Vychozi: 0.30 (%). Simulace i scan pouzivaji fee_pct = fee/100.")
         create_tooltip(cb_allow, "Povoli short obchody v simulaci a scanu.")
         create_tooltip(ent_mclo, "Vychozi: 0.45. Musi byt mensi nez min_conf.")
@@ -942,7 +942,7 @@ class TradingGUI(tk.Tk):
             "  min_conf_trade 0.45-0.60,\n"
             "  min_conf_dir   0.50-0.65,\n"
             "  min_margin_dir 0.03-0.12.\n"
-            "- min_conf (globalni): obvykle 0.45-0.60 (vychozi 0.55).\n\n"
+            "- min_conf (globalni): obvykle 0.47-0.56 (vychozi 0.50).\n\n"
             "5) Analyza modelu\n"
             "- Scan min_conf prochazi rozsah hodnot a ukaze nejlepsi kompromis.\n"
             "- Trade-log/graf/posledni obchody ctou vysledky posledni simulace.\n"
@@ -955,7 +955,8 @@ class TradingGUI(tk.Tk):
             "- min_conf:\n"
             "  Globalni filtr sily signalu (0-1). Vyssi hodnota = mene obchodu.\n"
             "  Pouziva Predikce, Scan min_conf i Simulace.\n"
-            "  Doporuceni: 0.45-0.60 (vychozi 0.55).\n"
+            "  Doporuceni: 0.47-0.56 (vychozi 0.50).\n"
+            "  Prakticky: 0.47 = vice obchodu, 0.56 = prisnejsi filtr.\n"
             "- fee %:\n"
             "  Poplatek za obchod v procentech (0.30 = 0.3 %).\n"
             "  Pouziva Scan i Simulace (neovlivnuje vypocet samotne predikce).\n"
@@ -980,7 +981,7 @@ class TradingGUI(tk.Tk):
             "- Proto je normalni, ze pri stejne predikci mohou ruzna nastaveni\n"
             "  simulace dat odlisny pocet obchodu a odlisne PnL.\n\n"
             "Vychozi pokrocile parametry\n"
-            "- min_conf = 0.55\n"
+            "- min_conf = 0.50\n"
             "- min_conf_low = 0.45\n"
             "- riziko na obchod = 5 % (trade_pct=0.05)\n"
             "- trade_pct_low(auto) = 2 %\n"
@@ -1132,7 +1133,7 @@ class TradingGUI(tk.Tk):
             self.py(), str(PREDICT_SCRIPT),
             "--timeframe", tf,
             "--output", str(out_csv),
-            "--min_conf", f"{getattr(self,'var_minc', tk.DoubleVar(value=0.55)).get():.4f}"
+            "--min_conf", f"{getattr(self,'var_minc', tk.DoubleVar(value=0.50)).get():.4f}"
         ]
 
         # --features: posílej jen když je zdroj indikátorů „ruční“
@@ -1185,7 +1186,7 @@ class TradingGUI(tk.Tk):
             messagebox.showwarning("Upozornění", f"Nejprve vygeneruj predikce ({pred_csv}).")
             self.log_live_async(f"[WARN] Simulace nespustena: chybi {pred_csv}")
             return
-        minc = getattr(self, 'var_minc', tk.DoubleVar(value=0.55)).get()
+        minc = getattr(self, 'var_minc', tk.DoubleVar(value=0.50)).get()
         fee = getattr(self, 'var_fee', tk.DoubleVar(value=0.30)).get()
         allow = getattr(self, 'var_allow_short', tk.BooleanVar(value=True)).get()
         mclo = getattr(self, 'var_mclo', tk.DoubleVar(value=-1)).get()
@@ -1411,7 +1412,7 @@ class TradingGUI(tk.Tk):
         cmd = [
             self.py(), str(LIVE_SCRIPT),
             "--timeframe", self.var_tf.get(),
-            "--min_conf",  f"{getattr(self,'var_minc', tk.DoubleVar(value=0.55)).get():.2f}",
+            "--min_conf",  f"{getattr(self,'var_minc', tk.DoubleVar(value=0.50)).get():.2f}",
             "--poll_sec", "10"
         ]
         if getattr(self,'var_allow_short', tk.BooleanVar(value=True)).get():
@@ -1530,7 +1531,7 @@ class TradingGUI(tk.Tk):
             self.py(), str(live_py),
             "--base", base,
             "--timeframe", tf,
-            "--min-conf",  str(getattr(self,'var_minc', tk.DoubleVar(value=0.55)).get()),
+            "--min-conf",  str(getattr(self,'var_minc', tk.DoubleVar(value=0.50)).get()),
             "--trade-pct", f"{self._trade_pct_strong():.4f}",
             "--trade-pct-low", f"{self._trade_pct_low():.4f}",
         ]

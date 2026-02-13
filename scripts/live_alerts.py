@@ -1,5 +1,5 @@
 # scripts/live_alerts.py
-import os, time, sys
+import os, time, sys, json
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -48,26 +48,77 @@ def load_meta(timeframe="5m"):
     meta_path = MODELS / f"features_tv_{timeframe}.json"
     if not meta_path.exists():
         raise FileNotFoundError(f"Chybí metadata: {meta_path}")
-    import json
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
-    model = load_model(ROOT / meta["model_path"])
-    scaler = joblib.load(ROOT / meta["scaler_path"])
-    feats = meta["feature_cols"]
+
     seq_len = int(meta["seq_len"])
     indicators = [f.strip().lower() for f in meta.get("features", [])]
     cot_shift_days = int(meta.get("cot_shift_days", 0))
     use_dxy = bool(meta.get("use_dxy", False))
     use_cot = bool(meta.get("use_cot", False))
-    return model, scaler, feats, seq_len, indicators, cot_shift_days, use_dxy, use_cot
+
+    ts = (meta.get("two_stage") or {})
+    ts_enabled = bool(ts.get("enabled"))
+    req_trade = ts.get("model_path_trade")
+    req_dir = ts.get("model_path_dir")
+    req_scaler_trade = ts.get("scaler_path_trade")
+    req_scaler_dir = ts.get("scaler_path_dir")
+    ts_ready = ts_enabled and all([req_trade, req_dir, req_scaler_trade, req_scaler_dir])
+
+    if ts_ready:
+        cfg = {
+            "timeframe": timeframe,
+            "mode": "two_stage",
+            "seq_len": seq_len,
+            "indicators": indicators,
+            "cot_shift_days": cot_shift_days,
+            "use_dxy": use_dxy,
+            "use_cot": use_cot,
+            "model_trade": load_model(ROOT / req_trade),
+            "model_dir": load_model(ROOT / req_dir),
+            "scaler_trade": joblib.load(ROOT / req_scaler_trade),
+            "scaler_dir": joblib.load(ROOT / req_scaler_dir),
+            "feature_cols_trade": ts.get("feature_cols_trade") or meta.get("feature_cols_trade") or [],
+            "feature_cols_dir": ts.get("feature_cols_dir") or meta.get("feature_cols_dir") or [],
+            "features_trade": [f.strip().lower() for f in (ts.get("features_trade") or indicators)],
+            "features_dir": [f.strip().lower() for f in (ts.get("features_dir") or indicators)],
+            "min_conf_trade": float(ts.get("min_conf_trade", meta.get("min_conf_trade", 0.48))),
+            "min_conf_dir": float(ts.get("min_conf_dir", meta.get("min_conf_dir", 0.55))),
+            "min_margin_dir": float(ts.get("min_margin_dir", meta.get("min_margin_dir", 0.05))),
+            "vol_filter": meta.get("vol_filter", {}),
+        }
+        if not cfg["feature_cols_trade"] or not cfg["feature_cols_dir"]:
+            raise ValueError("Two-stage metadata jsou nekompletní: chybí feature_cols_trade/feature_cols_dir.")
+        return cfg
+
+    # fallback na single-stage
+    return {
+        "timeframe": timeframe,
+        "mode": "single",
+        "seq_len": seq_len,
+        "indicators": indicators,
+        "cot_shift_days": cot_shift_days,
+        "use_dxy": use_dxy,
+        "use_cot": use_cot,
+        "model": load_model(ROOT / meta["model_path"]),
+        "scaler": joblib.load(ROOT / meta["scaler_path"]),
+        "feature_cols": meta["feature_cols"],
+    }
 
 def last_closed_bar_5m(ts: pd.Timestamp) -> bool:
     # jednoduchá detekce uzavřené 5m svíčky v lokálním čase souboru:
     # spoléháme na to, že gold_5m.csv je generováno fetch skriptem po uzavření baru
     return True
 
-def predict_last(model, scaler, feats, seq_len, timeframe="5m", indicators=None, cot_shift_days=0, use_dxy=False, use_cot=False):
+def predict_last(cfg):
     # načti GOLD
+    timeframe = cfg["timeframe"]
+    seq_len = int(cfg["seq_len"])
+    indicators = cfg.get("indicators", [])
+    cot_shift_days = int(cfg.get("cot_shift_days", 0))
+    use_dxy = bool(cfg.get("use_dxy", False))
+    use_cot = bool(cfg.get("use_cot", False))
+
     gold = _read_csv(DATA / f"gold_{'5m' if timeframe=='5m' else '1h'}.csv")
     if gold.empty or len(gold) < seq_len+1:
         return None
@@ -98,20 +149,77 @@ def predict_last(model, scaler, feats, seq_len, timeframe="5m", indicators=None,
     for c in ("vix","dxy","cot"):
         gold[c] = gold[c].ffill().bfill()
 
-    gold = add_indicators(gold, indicators or [])
+    if cfg["mode"] == "two_stage":
+        union_feats = []
+        for f in (cfg.get("features_trade", []) + cfg.get("features_dir", [])):
+            f = (f or "").strip().lower()
+            if f and f not in union_feats:
+                union_feats.append(f)
+        for f in ("atr", "bb"):
+            if f not in union_feats:
+                union_feats.append(f)
+        gold = add_indicators(gold, union_feats)
 
-    # vyber jen požadované featury (chybějící doplň 0)
-    X_df = gold.copy()
-    for c in feats:
-        if c not in X_df.columns: X_df[c] = 0.0
-    X_df = X_df[feats].ffill().bfill()
-    X_all = scaler.transform(X_df.values.astype(float))
-    X_seq = X_all[-seq_len:]  # poslední sekvence
-    X_seq = np.expand_dims(X_seq, axis=0)  # (1, seq_len, n_feat)
+        fcols_trade = cfg["feature_cols_trade"]
+        fcols_dir = cfg["feature_cols_dir"]
+        for c in fcols_trade:
+            if c not in gold.columns:
+                gold[c] = 0.0
+        for c in fcols_dir:
+            if c not in gold.columns:
+                gold[c] = 0.0
 
-    probs = model.predict(X_seq, verbose=0)[0]  # (3,)
-    cls = int(np.argmax(probs))
-    strength = float(np.max(probs))
+        X_tr = gold[fcols_trade].ffill().bfill().values.astype(float)
+        X_di = gold[fcols_dir].ffill().bfill().values.astype(float)
+        X_tr = cfg["scaler_trade"].transform(X_tr)
+        X_di = cfg["scaler_dir"].transform(X_di)
+        X_tr = np.expand_dims(X_tr[-seq_len:], axis=0)
+        X_di = np.expand_dims(X_di[-seq_len:], axis=0)
+
+        p_trade = float(cfg["model_trade"].predict(X_tr, verbose=0)[0][0])
+        p_buy = float(cfg["model_dir"].predict(X_di, verbose=0)[0][0])
+        p_sell = 1.0 - p_buy
+        p_no = 1.0 - p_trade
+
+        cls = 0
+        if p_trade >= cfg["min_conf_trade"]:
+            dir_conf = max(p_buy, p_sell)
+            margin = abs(p_buy - p_sell)
+            if dir_conf >= cfg["min_conf_dir"] and margin >= cfg["min_margin_dir"]:
+                cls = 1 if p_buy > p_sell else 2
+
+        # volatility gate
+        vol_cfg = cfg.get("vol_filter", {}) or {}
+        if bool(vol_cfg.get("enabled")) and ("atr_norm" in gold.columns) and ("bb_width" in gold.columns):
+            thr_atr = float(vol_cfg.get("min_atr_norm", gold["atr_norm"].quantile(0.05)))
+            thr_bb = float(vol_cfg.get("min_bb_width", gold["bb_width"].quantile(0.05)))
+            last = gold.iloc[-1]
+            if (float(last["atr_norm"]) < thr_atr) and (float(last["bb_width"]) < thr_bb):
+                cls = 0
+                p_trade = 0.0
+                p_no = 1.0
+                p_buy = 0.0
+                p_sell = 0.0
+
+        strength = float(p_buy if cls == 1 else (p_sell if cls == 2 else p_no))
+    else:
+        gold = add_indicators(gold, indicators or [])
+        feats = cfg["feature_cols"]
+        X_df = gold.copy()
+        for c in feats:
+            if c not in X_df.columns:
+                X_df[c] = 0.0
+        X_df = X_df[feats].ffill().bfill()
+        X_all = cfg["scaler"].transform(X_df.values.astype(float))
+        X_seq = X_all[-seq_len:]
+        X_seq = np.expand_dims(X_seq, axis=0)
+        probs = cfg["model"].predict(X_seq, verbose=0)[0]
+        cls = int(np.argmax(probs))
+        strength = float(np.max(probs))
+        p_no = float(probs[0])
+        p_buy = float(probs[1])
+        p_sell = float(probs[2])
+
     # vrať i aktuální cenu a datum posledního baru
     last = gold.iloc[-1]
     return {
@@ -119,9 +227,9 @@ def predict_last(model, scaler, feats, seq_len, timeframe="5m", indicators=None,
         "price": float(last["close"]),
         "signal": cls,
         "strength": strength,
-        "proba_no_trade": float(probs[0]),
-        "proba_buy": float(probs[1]),
-        "proba_sell": float(probs[2])
+        "proba_no_trade": p_no,
+        "proba_buy": p_buy,
+        "proba_sell": p_sell
     }
 
 def beep(signal:int):
@@ -149,20 +257,14 @@ def live_loop(timeframe="5m", min_conf=0.47, allow_short=True, poll_sec=10, out_
     if not out_csv.exists():
         pd.DataFrame(columns=["date", "signal", "strength", "price", "proba_no_trade", "proba_buy", "proba_sell"]).to_csv(out_csv, index=False)
 
-    model, scaler, feats, seq_len, indicators, cot_shift_days, use_dxy, use_cot = load_meta(timeframe=timeframe)
+    cfg = load_meta(timeframe=timeframe)
+    print(f"[INFO] Live inference mode: {cfg['mode']}", flush=True)
     last_alert_time = None
 
     while True:
         try:
             # poslední uzavřený bar
-            res = predict_last(
-                model, scaler, feats, seq_len,
-                timeframe=timeframe,
-                indicators=indicators,
-                cot_shift_days=cot_shift_days,
-                use_dxy=use_dxy,
-                use_cot=use_cot
-            )
+            res = predict_last(cfg)
             if res is None:
                 time.sleep(poll_sec); continue
 
