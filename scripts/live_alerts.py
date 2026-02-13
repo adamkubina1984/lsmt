@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import joblib
 from datetime import datetime
-from tensorflow.keras.models import load_model
+from keras.models import load_model
 from features import add_indicators
 
 # Windows zvuk / toast (toast volitelně)

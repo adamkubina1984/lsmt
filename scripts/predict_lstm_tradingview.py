@@ -16,7 +16,7 @@ import subprocess
 import uuid
 import sys
 from pathlib import Path
-from tensorflow.keras.models import load_model
+from keras.models import load_model
 from features import add_indicators
 from simulate_strategy_v2 import simulate
 
