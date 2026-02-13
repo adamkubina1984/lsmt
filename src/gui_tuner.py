@@ -1468,6 +1468,7 @@ class TradingGUI(tk.Tk):
             return
 
         tf = self.var_tf.get()
+        base = getattr(self, 'var_base', tk.StringVar(value='gold')).get().strip().lower() or "gold"
         meta_path = ROOT / "models" / f"features_tv_{tf}.json"
         mode_info = "single-stage"
         model_info = ""
