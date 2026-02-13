@@ -1443,8 +1443,8 @@ class TradingGUI(tk.Tk):
                 self.log_live_async(line)
         except Exception as e:
             self._set_live_status("chyba")
-            self.log_async(f"[V??JIMKA Live] {e}")
-            self.log_live_async(f"[V??JIMKA Live] {e}")
+            self.log_async(f"[VYJIMKA Live] {e}")
+            self.log_live_async(f"[VYJIMKA Live] {e}")
         finally:
             try:
                 if self._live_proc is None or self._live_proc.poll() is not None:
