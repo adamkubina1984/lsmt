@@ -9,6 +9,7 @@ import itertools
 import subprocess
 import tempfile
 import sys
+import math
 from pathlib import Path
 
 # === Konfigurace ===
@@ -23,6 +24,47 @@ DEFAULT_SIMULATE_SCRIPT = "scripts/simulate_strategy_v2.py"
 
 MODELS_DIR = Path("models")
 RESULTS_DIR = Path("results")
+
+def _canon_key(indicators):
+    return tuple(sorted(set(indicators)))
+
+
+def _dedupe_population(population):
+    seen = set()
+    out = []
+    for inds in population:
+        k = _canon_key(inds)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(list(k))
+    return out
+
+
+def _random_candidate(min_size=5, max_size=10):
+    size = random.randint(min_size, max_size)
+    return random.sample(ALL_INDICATORS, size)
+
+def _score(pnl):
+    # NaN/None nechceme v top žebříčku
+    try:
+        v = float(pnl)
+    except Exception:
+        return float("-inf")
+    if v != v:  # NaN check
+        return float("-inf")
+    return v
+
+def _bars_per_day(timeframe: str) -> float:
+    tf = str(timeframe).strip().lower()
+    if tf.endswith("m"):
+        mins = int(tf[:-1])
+        return 1440.0 / float(mins) if mins > 0 else 288.0
+    if tf.endswith("h"):
+        hours = int(tf[:-1])
+        return 24.0 / float(hours) if hours > 0 else 24.0
+    return 288.0
+
 
 def run_pipeline(indicators, timeframe, min_trades_per_day, eval_tail_frac=0.2, min_eval_rows=600):
     """
@@ -46,7 +88,8 @@ def run_pipeline(indicators, timeframe, min_trades_per_day, eval_tail_frac=0.2, 
     pred_cmd = [sys.executable, "-u", str(DEFAULT_PREDICT_SCRIPT),
                 "--timeframe", str(timeframe),
                 "--output", str(out_pred),
-                "--features", ind_key]
+                "--features", ind_key,
+                "--force_single"]
     print("[PRED ]", " ".join(pred_cmd), flush=True)
     subprocess.run(pred_cmd, check=True)
 
@@ -93,11 +136,23 @@ def run_pipeline(indicators, timeframe, min_trades_per_day, eval_tail_frac=0.2, 
         df_tr = pd.read_csv(trades_csv)
         trades = len(df_tr)
 
-    # Penalizace za nízkou aktivitu (např. týden dat -> 5 dní)
-    if trades < (min_trades_per_day * 5):
+    # Penalizace za nízkou aktivitu: dynamicky dle délky eval okna
+    bars_per_day = _bars_per_day(timeframe)
+    eval_rows = 0
+    try:
+        eval_rows = len(pd.read_csv(eval_pred))
+    except Exception:
+        eval_rows = 0
+    eval_days = (float(eval_rows) / bars_per_day) if bars_per_day > 0 else 0.0
+    min_trades_req = max(1, int(math.ceil(float(min_trades_per_day) * eval_days)))
+    if trades < min_trades_req:
         pnl = -99.99
 
-    print(f"[EVAL] features=[{ind_key}] -> PnL={pnl:.2f}% | Trades={trades}", flush=True)
+    print(
+        f"[EVAL] features=[{ind_key}] -> PnL={pnl:.2f}% | Trades={trades} "
+        f"| eval_days={eval_days:.2f} | min_req={min_trades_req}",
+        flush=True
+    )
     return pnl, indicators
 
 def update_metadata(timeframe, indicators):
@@ -139,8 +194,11 @@ def main():
     generations = args.generations
     tf = args.timeframe
 
-    population = [random.sample(ALL_INDICATORS, random.randint(5, 10)) for _ in range(pop_size)]
-    best_results = []
+    population = []
+    while len(population) < pop_size:
+        population.append(_random_candidate())
+        population = _dedupe_population(population)
+    best_by_key = {}
 
     for gen in range(generations):
         print(f"\n=== Generace {gen+1}/{generations} ===")
@@ -155,10 +213,20 @@ def main():
             )
             gen_results.append((pnl, used_inds))
 
-        gen_results.sort(reverse=True, key=lambda x: x[0])
-        best_results.extend(gen_results)
-        best_results.sort(reverse=True, key=lambda x: x[0])
-        best_results = best_results[:10]  # top 10 celkově
+        gen_results.sort(reverse=True, key=lambda x: _score(x[0]))
+
+        # Udržuj globální TOP unikátních sad indikátorů (stejná sada jen jednou)
+        for pnl, inds in gen_results:
+            k = _canon_key(inds)
+            prev = best_by_key.get(k)
+            if (prev is None) or (_score(pnl) > _score(prev[0])):
+                best_by_key[k] = (pnl, list(k))
+
+        best_results = sorted(
+            best_by_key.values(),
+            reverse=True,
+            key=lambda x: _score(x[0])
+        )[:10]  # top 10 unikátních sad
 
         print("\nTOP kombinace:")
         for pnl, inds in best_results[:3]:
@@ -167,6 +235,7 @@ def main():
         # Nová populace = elita + mutace
         elite = [inds for _, inds in gen_results[:2]]
         new_pop = elite.copy()
+        seen_new = set(_canon_key(x) for x in new_pop)
         while len(new_pop) < pop_size:
             base = random.choice(elite)
             modified = base.copy()
@@ -176,7 +245,28 @@ def main():
                 candidates = [i for i in ALL_INDICATORS if i not in modified]
                 if candidates:
                     modified.append(random.choice(candidates))
-            new_pop.append(modified)
+            k = _canon_key(modified)
+            if k in seen_new:
+                # fallback: vygeneruj jiného kandidáta, ať se populace neopakuje
+                tries = 0
+                while tries < 20 and k in seen_new:
+                    modified = _random_candidate()
+                    k = _canon_key(modified)
+                    tries += 1
+            if k in seen_new:
+                # krajní fallback: náhodně vezmi něco, co ještě není použito
+                for _ in range(50):
+                    cand = _random_candidate()
+                    kc = _canon_key(cand)
+                    if kc not in seen_new:
+                        modified, k = cand, kc
+                        break
+            if k in seen_new:
+                # když už opravdu nic nového nenajdu, ukonči doplňování
+                print("[WARN] Nelze doplnit unikátní populaci, pokračuji s menší.", flush=True)
+                break
+            seen_new.add(k)
+            new_pop.append(list(k))
         population = new_pop
 
     print("\n=== Nejlepší nalezené kombinace ===")

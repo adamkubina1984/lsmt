@@ -372,12 +372,12 @@ class TradingGUI(tk.Tk):
         create_tooltip(e_ep, "Počet epoch. Doporučený start 15–40. Když val_loss stagnuje, další epochy už nepomáhají.")
 
         tk.Label(row1, text="batch").pack(side='left')
-        self.var_batch = tk.IntVar(value=32)
+        self.var_batch = tk.IntVar(value=24)
         e_ba = tk.Entry(row1, textvariable=self.var_batch, width=6); e_ba.pack(side='left', padx=(4, 12))
         create_tooltip(
             e_ba,
             "Počet vzorků na jeden update gradientu.\n"
-            "Doporučený rozsah 16–128 (start 32).\n"
+            "Doporučený rozsah 16–128 (start 24).\n"
             "Menší batch = pomalejší, ale někdy stabilnější; větší batch = rychlejší, ale může zhoršit generalizaci."
         )
 
@@ -929,7 +929,7 @@ class TradingGUI(tk.Tk):
             "  5m: obvykle 20-80 (start 30), 1h: obvykle 12-48.\n"
             "- thr_pct: jak citlive se tvori BUY/SELL/NO-TRADE labely.\n"
             "- epochs: obvykle 15-40; vyssi dava smysl jen pokud val_loss stale klesa.\n"
-            "- batch: obvykle 16-128 (start 32).\n"
+            "- batch: obvykle 16-128 (start 24).\n"
             "- Rezim treninku:\n"
             "  Multi = 1 model (BUY/SELL/NO-TRADE),\n"
             "  Two-stage = 2 modely (Trade/NoTrade -> Buy/Sell).\n\n"

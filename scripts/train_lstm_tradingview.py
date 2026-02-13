@@ -159,7 +159,7 @@ def train_lstm(
     horizon: int = 3,
     thr_pct: float = 0.2,
     epochs: int = 20,
-    batch_size: int = 32,
+    batch_size: int = 24,
     model_name: str = None,
     cot_shift_days: int = 3,
     features: str = "rsi,macd,ema20,bb,atr",
@@ -483,7 +483,7 @@ if __name__ == "__main__":
     parser.add_argument("--horizon", type=int, default=3)
     parser.add_argument("--thr_pct", type=float, default=0.3)
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=24)
     parser.add_argument("--model_name", type=str, default=None)
     parser.add_argument("--cot_shift_days", type=int, default=3, help="Posun COT dat (dny, + posouvá kupředu; default 3)")
     parser.add_argument("--use_dxy", action="store_true", help="Zapnout DXY feature v train pipeline.")
